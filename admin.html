@@ -37,7 +37,6 @@ body { background: #f5f2ec; }
           <div id="user-email" class="text-muted small"></div>
         </div>
         <span id="ws-status" class="badge bg-secondary ms-auto">connecting…</span>
-        <button id="logout-btn" class="btn btn-outline-secondary btn-sm">Sign out</button>
       </div>
     </div>
 
@@ -286,11 +285,6 @@ function connectWebSocket() {
     }
   });
 }
-
-document.getElementById('logout-btn').addEventListener('click', async () => {
-  await fetch(`${BACKEND}/api/auth/logout`, {method: 'POST', credentials: 'include'});
-  showSignedOut();
-});
 
 checkSession();
 </script>
