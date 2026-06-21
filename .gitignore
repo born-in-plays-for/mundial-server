@@ -1,0 +1,6 @@
+.DS_Store
+__pycache__/
+.env
+backend.log
+users.json
+client_secret_*.json

@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mundial · Admin</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css">
+<style>
+body { background: #f5f2ec; }
+.toast-login { border-left: 4px solid #198754; }
+.toast-logout { border-left: 4px solid #dc3545; }
+</style>
+</head>
+<body>
+
+<div class="container py-4" style="max-width: 720px">
+  <h1 class="fs-4 fw-bold mb-4">Mundial — Admin</h1>
+
+  <!-- Not signed in -->
+  <div id="signed-out">
+    <p class="text-muted">Sign in with Google to continue.</p>
+    <div id="g_id_onload"
+         data-client_id="657438044008-qddq7m5mgk59k8qnhjpd6dalndqqb50e.apps.googleusercontent.com"
+         data-callback="onGoogleSignIn"
+         data-auto_prompt="false">
+    </div>
+    <div class="g_id_signin" data-type="standard" data-size="large" data-theme="outline"></div>
+  </div>
+
+  <!-- Signed in -->
+  <div id="signed-in" class="d-none">
+    <div class="card mb-3">
+      <div class="card-body d-flex align-items-center gap-3">
+        <img id="user-pic" class="rounded-circle" width="48" height="48" alt="">
+        <div>
+          <div id="user-name" class="fw-bold"></div>
+          <div id="user-email" class="text-muted small"></div>
+        </div>
+        <span id="ws-status" class="badge bg-secondary ms-auto">connecting…</span>
+        <button id="logout-btn" class="btn btn-outline-secondary btn-sm">Sign out</button>
+      </div>
+    </div>
+
+    <!-- Admin section -->
+    <div id="admin-section" class="d-none">
+      <h2 class="fs-5 fw-bold mb-3">Users</h2>
+      <div id="activity-log" class="mb-3"></div>
+      <table class="table table-sm table-hover">
+        <thead>
+          <tr><th></th><th>Picture</th><th>Name</th><th>Device</th><th>Last login</th><th></th></tr>
+        </thead>
+        <tbody id="users-tbody"></tbody>
+      </table>
+    </div>
+
+    <div id="not-admin" class="d-none">
+      <p class="text-muted">You are signed in but do not have admin access.</p>
+    </div>
+  </div>
+</div>
+
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<script src="https://cdn.jsdelivr.net/npm/socket.io-client@4/dist/socket.io.min.js"></script>
+<script>
+const BACKEND = window.location.origin;
+let socket = null;
+let mySid = null;
+
+async function onGoogleSignIn(response) {
+  const r = await fetch(`${BACKEND}/api/auth/google`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    credentials: 'include',
+    body: JSON.stringify({credential: response.credential})
+  });
+  const data = await r.json();
+  if (data.user) {
+    mySid = data.sid;
+    showUser(data.user, data.admin);
+  }
+}
+
+async function checkSession() {
+  try {
+    const r = await fetch(`${BACKEND}/api/auth/me`, {credentials: 'include'});
+    const data = await r.json();
+    if (data.user) {
+      mySid = data.sid;
+      showUser(data.user, data.admin);
+    }
+  } catch {}
+}
+
+function showUser(user, isAdmin) {
+  document.getElementById('signed-out').classList.add('d-none');
+  document.getElementById('signed-in').classList.remove('d-none');
+  document.getElementById('user-pic').src = user.picture;
+  document.getElementById('user-name').textContent = user.name;
+  document.getElementById('user-email').textContent = user.email;
+
+  if (isAdmin) {
+    document.getElementById('admin-section').classList.remove('d-none');
+    loadUsers();
+    connectWebSocket();
+  } else {
+    document.getElementById('not-admin').classList.remove('d-none');
+  }
+}
+
+let onlineSessions = [];
+let allUsers = {};
+
+async function loadUsers() {
+  const [usersR, onlineR] = await Promise.all([
+    fetch(`${BACKEND}/api/admin/users`, {credentials: 'include'}),
+    fetch(`${BACKEND}/api/admin/online`, {credentials: 'include'})
+  ]);
+  if (!usersR.ok) return;
+  allUsers = await usersR.json();
+  onlineSessions = onlineR.ok ? await onlineR.json() : [];
+  renderUsers();
+}
+
+function renderUsers() {
+  const tbody = document.getElementById('users-tbody');
+  const onlineEmails = new Set(onlineSessions.map(s => s.email));
+  const sessionsByEmail = {};
+  onlineSessions.forEach(s => {
+    if (!sessionsByEmail[s.email]) sessionsByEmail[s.email] = [];
+    sessionsByEmail[s.email].push(s);
+  });
+
+  tbody.innerHTML = Object.values(allUsers)
+    .sort((a, b) => {
+      const aOn = onlineEmails.has(a.email) ? 1 : 0;
+      const bOn = onlineEmails.has(b.email) ? 1 : 0;
+      if (bOn !== aOn) return bOn - aOn;
+      return (b.last_login ?? '').localeCompare(a.last_login ?? '');
+    })
+    .flatMap(u => {
+      const sessions = sessionsByEmail[u.email] ?? [];
+      if (sessions.length === 0) {
+        return [`
+    <tr style="opacity:0.35">
+      <td><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#ccc"></span></td>
+      <td><img src="${u.picture}" class="rounded-circle" width="28" height="28" alt="" referrerpolicy="no-referrer"></td>
+      <td>${u.name}</td>
+      <td>${u.email}</td>
+      <td class="text-muted small">${u.last_login ?? '—'}</td>
+      <td><button class="btn btn-outline-danger btn-sm py-0 px-1" style="font-size:10px" onclick="deleteUser('${u.email}')">delete</button></td>
+    </tr>`];
+      }
+      const isMyUser = sessions.some(s => s.sid === mySid);
+      const otherSessions = sessions.filter(s => s.sid !== mySid);
+      return sessions.map((s, i) => {
+        const isMe = s.sid === mySid;
+        const kickBtn = isMe
+          ? `<button class="btn btn-outline-danger btn-sm py-0 px-1" style="font-size:10px" disabled>kick</button>`
+          : `<button class="btn btn-outline-danger btn-sm py-0 px-1" style="font-size:10px" onclick="kickSession('${s.sid}')">kick</button>`;
+        let userBtns = '';
+        if (i === 0) {
+          const kickAllDisabled = otherSessions.length === 0;
+          userBtns = `<button class="btn btn-outline-warning btn-sm py-0 px-1 me-1" style="font-size:10px" onclick="kickAll('${u.email}')" ${kickAllDisabled ? 'disabled' : ''}>kick all</button><button class="btn btn-outline-danger btn-sm py-0 px-1" style="font-size:10px" onclick="deleteUser('${u.email}')" ${isMyUser ? 'disabled' : ''}>delete</button>`;
+        }
+        return `
+    <tr>
+      <td><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#198754"></span></td>
+      <td>${i === 0 ? `<img src="${u.picture}" class="rounded-circle" width="28" height="28" alt="" referrerpolicy="no-referrer">` : ''}</td>
+      <td>${i === 0 ? u.name : ''}</td>
+      <td><span class="text-muted small">${s.device}</span></td>
+      <td class="text-muted small">${s.time}</td>
+      <td class="text-nowrap">${i === 0 ? userBtns : kickBtn}</td>
+    </tr>`;
+      });
+    }).join('');
+}
+
+async function kickSession(sid) {
+  await fetch(BACKEND + '/api/admin/kick', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    credentials: 'include',
+    body: JSON.stringify({sid})
+  });
+}
+
+async function kickAll(email) {
+  await fetch(BACKEND + '/api/admin/kick', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    credentials: 'include',
+    body: JSON.stringify({email})
+  });
+}
+
+async function deleteUser(email) {
+  if (!confirm(`Delete ${email} from user history?`)) return;
+  await fetch(BACKEND + '/api/admin/delete', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    credentials: 'include',
+    body: JSON.stringify({email})
+  });
+}
+
+function addActivity(type, user) {
+  const log = document.getElementById('activity-log');
+  const cls = type === 'login' ? 'toast-login' : 'toast-logout';
+  const icon = type === 'login' ? '→' : '←';
+  const label = type === 'login' ? 'signed in' : 'signed out';
+  const now = new Date().toLocaleTimeString();
+  const el = document.createElement('div');
+  el.className = `alert alert-light py-1 px-2 mb-1 small d-flex align-items-center gap-2 ${cls}`;
+  el.innerHTML = `
+    <img src="${user.picture}" class="rounded-circle" width="20" height="20" alt="">
+    <span><strong>${user.name}</strong> ${label}</span>
+    <span class="text-muted ms-auto">${now}</span>`;
+  log.prepend(el);
+  // Keep last 20
+  while (log.children.length > 20) log.lastChild.remove();
+}
+
+function isMySession(sid, email) {
+  if (sid) return sid === mySid;
+  return email === document.getElementById('user-email')?.textContent;
+}
+
+function showSignedOut() {
+  if (socket) socket.disconnect();
+  document.getElementById('signed-in').classList.add('d-none');
+  document.getElementById('admin-section').classList.add('d-none');
+  document.getElementById('not-admin').classList.add('d-none');
+  document.getElementById('signed-out').classList.remove('d-none');
+}
+
+function connectWebSocket() {
+  const badge = document.getElementById('ws-status');
+  socket = io(BACKEND);
+
+  socket.on('connect', () => {
+    badge.textContent = 'live';
+    badge.className = 'badge bg-success ms-auto';
+  });
+
+  socket.on('disconnect', () => {
+    badge.textContent = 'disconnected';
+    badge.className = 'badge bg-danger ms-auto';
+  });
+
+  socket.on('user_login', user => {
+    addActivity('login', user);
+    allUsers[user.email] = {email: user.email, name: user.name, picture: user.picture, last_login: user.last_login};
+    onlineSessions.push({email: user.email, device: user.device, time: user.last_login, sid: user.sid});
+    renderUsers();
+  });
+
+  socket.on('user_logout', user => {
+    addActivity('logout', user);
+    if (user.sid) {
+      onlineSessions = onlineSessions.filter(s => s.sid !== user.sid);
+    } else {
+      onlineSessions = onlineSessions.filter(s => s.email !== user.email);
+    }
+    renderUsers();
+    if (isMySession(user.sid, user.email)) showSignedOut();
+  });
+
+  socket.on('user_deleted', ({email}) => {
+    delete allUsers[email];
+    onlineSessions = onlineSessions.filter(s => s.email !== email);
+    renderUsers();
+    if (isMySession(null, email)) showSignedOut();
+  });
+
+  socket.on('user_kicked', ({email, sid}) => {
+    addActivity('logout', {name: email, picture: allUsers[email]?.picture ?? ''});
+    if (sid) {
+      onlineSessions = onlineSessions.filter(s => s.sid !== sid);
+    } else {
+      onlineSessions = onlineSessions.filter(s => s.email !== email);
+    }
+    renderUsers();
+    if (isMySession(sid, email)) {
+      fetch(BACKEND + '/api/auth/logout', {method: 'POST', credentials: 'include'}).catch(() => {});
+      showSignedOut();
+    }
+  });
+}
+
+document.getElementById('logout-btn').addEventListener('click', async () => {
+  await fetch(`${BACKEND}/api/auth/logout`, {method: 'POST', credentials: 'include'});
+  showSignedOut();
+});
+
+checkSession();
+</script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
