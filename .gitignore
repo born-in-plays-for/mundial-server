@@ -4,3 +4,4 @@ __pycache__/
 backend.log
 users.json
 client_secret_*.json
+polls/

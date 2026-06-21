@@ -2,7 +2,9 @@
 backend.py — Flask backend for the Mundial app.
 
 - Polls API-Football every 60s when polling is enabled (admin toggle)
-- Pushes live fixtures to clients via WebSocket ('live_update' event)
+- Also fetches events per live WC fixture each tick
+- Pushes live fixtures (with events) to clients via WebSocket ('live_update')
+- Saves each poll to polls/ directory for later inspection
 - GET /api/live returns latest stored data (no API call)
 - GET /api/lineups/<id> fetches directly (lineups don't change mid-match)
 - Google Sign-In authentication
@@ -101,6 +103,7 @@ POLL_INTERVAL = 60  # seconds
 LATEST_FIXTURES = []  # most recent poll result
 POLL_ACTIVE = False
 _poll_thread = None
+POLLS_DIR = SERVER_DIR / "polls"
 
 def api_get(path, params):
     url = f"{API_BASE}{path}"
@@ -109,15 +112,40 @@ def api_get(path, params):
     r.raise_for_status()
     return r.json().get("response", [])
 
+def _save_poll(timestamp, fixtures, events_by_fixture):
+    POLLS_DIR.mkdir(exist_ok=True)
+    record = {
+        "timestamp": timestamp,
+        "fixtures": fixtures,
+        "events": {str(k): v for k, v in events_by_fixture.items()},
+    }
+    filename = POLLS_DIR / f"{timestamp.replace(':', '-')}.json"
+    filename.write_text(json.dumps(record, indent=2, ensure_ascii=False))
+    log.debug("POLL saved to %s", filename.name)
+
 def _poll_loop():
     global LATEST_FIXTURES, POLL_ACTIVE
     log.info("POLL started (every %ds)", POLL_INTERVAL)
     while POLL_ACTIVE:
         try:
+            ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             fixtures = api_get("/fixtures", {"live": "all"})
             wc = [f for f in fixtures if f["league"]["name"] == "World Cup"]
+            events_by_fixture = {}
+            for f in wc:
+                fid = f["fixture"]["id"]
+                try:
+                    events_by_fixture[fid] = api_get("/fixtures/events", {"fixture": fid})
+                except Exception as e:
+                    log.error("POLL events error fixture %d: %s", fid, e)
+            for f in wc:
+                fid = f["fixture"]["id"]
+                if fid in events_by_fixture:
+                    f["events"] = events_by_fixture[fid]
             LATEST_FIXTURES = wc
-            log.info("POLL → %d fixtures (%d WC), emitting live_update", len(fixtures), len(wc))
+            _save_poll(ts, wc, events_by_fixture)
+            log.info("POLL → %d fixtures (%d WC, %d event queries), emitting live_update",
+                     len(fixtures), len(wc), len(events_by_fixture))
             socketio.emit("live_update", wc)
         except Exception as e:
             log.error("POLL error: %s", e)
@@ -199,10 +227,32 @@ def admin_poll_status():
     user = session.get("user")
     if not user or user["email"] not in ADMIN_EMAILS:
         return jsonify({"error": "forbidden"}), 403
+    poll_count = len(list(POLLS_DIR.glob("*.json"))) if POLLS_DIR.exists() else 0
     return jsonify({
         "active": POLL_ACTIVE,
         "fixtures_count": len(LATEST_FIXTURES),
+        "saved_polls": poll_count,
     })
+
+@app.route("/api/admin/polls")
+def admin_polls_list():
+    user = session.get("user")
+    if not user or user["email"] not in ADMIN_EMAILS:
+        return jsonify({"error": "forbidden"}), 403
+    if not POLLS_DIR.exists():
+        return jsonify([])
+    files = sorted(POLLS_DIR.glob("*.json"), reverse=True)
+    return jsonify([f.stem for f in files])
+
+@app.route("/api/admin/polls/<name>")
+def admin_polls_get(name):
+    user = session.get("user")
+    if not user or user["email"] not in ADMIN_EMAILS:
+        return jsonify({"error": "forbidden"}), 403
+    path = POLLS_DIR / f"{name}.json"
+    if not path.exists():
+        return jsonify({"error": "not found"}), 404
+    return jsonify(json.loads(path.read_text()))
 
 # ── Auth ─────────────────────────────────────────────────────────────────────
 
