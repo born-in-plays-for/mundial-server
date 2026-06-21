@@ -100,10 +100,21 @@ def _save_users(users):
 # ── API-Football ─────────────────────────────────────────────────────────────
 
 POLL_INTERVAL = 60  # seconds
-LATEST_FIXTURES = []  # most recent poll result
 POLL_ACTIVE = False
 _poll_thread = None
 POLLS_DIR = SERVER_DIR / "polls"
+
+def _load_latest_poll():
+    if not POLLS_DIR.exists():
+        return []
+    files = sorted(POLLS_DIR.glob("*.json"))
+    if not files:
+        return []
+    data = json.loads(files[-1].read_text())
+    log.info("Loaded latest poll from %s", files[-1].name)
+    return data.get("fixtures", [])
+
+LATEST_FIXTURES = _load_latest_poll()
 
 def api_get(path, params):
     url = f"{API_BASE}{path}"
