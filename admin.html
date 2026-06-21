@@ -42,6 +42,14 @@ body { background: #f5f2ec; }
 
     <!-- Admin section -->
     <div id="admin-section" class="d-none">
+      <div class="card mb-3">
+        <div class="card-body d-flex align-items-center gap-3">
+          <span class="fw-bold">Live polling</span>
+          <span id="poll-status" class="badge bg-secondary">unknown</span>
+          <button id="poll-toggle" class="btn btn-sm btn-outline-success ms-auto" onclick="togglePoll()">Start</button>
+        </div>
+      </div>
+
       <h2 class="fs-5 fw-bold mb-3">Users</h2>
       <div id="activity-log" class="mb-3"></div>
       <table class="table table-sm table-hover">
@@ -100,6 +108,7 @@ function showUser(user, isAdmin) {
   if (isAdmin) {
     document.getElementById('admin-section').classList.remove('d-none');
     loadUsers();
+    loadPollStatus();
     connectWebSocket();
   } else {
     document.getElementById('not-admin').classList.remove('d-none');
@@ -246,6 +255,10 @@ function connectWebSocket() {
     badge.className = 'badge bg-danger ms-auto';
   });
 
+  socket.on('poll_status', ({active}) => {
+    updatePollUI(active);
+  });
+
   socket.on('user_login', user => {
     addActivity('login', user);
     allUsers[user.email] = {email: user.email, name: user.name, picture: user.picture, last_login: user.last_login};
@@ -284,6 +297,39 @@ function connectWebSocket() {
       showSignedOut();
     }
   });
+}
+
+async function loadPollStatus() {
+  try {
+    const r = await fetch(`${BACKEND}/api/admin/poll/status`, {credentials: 'include'});
+    if (!r.ok) return;
+    const data = await r.json();
+    updatePollUI(data.active);
+  } catch {}
+}
+
+function updatePollUI(active) {
+  const badge = document.getElementById('poll-status');
+  const btn = document.getElementById('poll-toggle');
+  if (active) {
+    badge.textContent = 'running';
+    badge.className = 'badge bg-success';
+    btn.textContent = 'Stop';
+    btn.className = 'btn btn-sm btn-outline-danger ms-auto';
+  } else {
+    badge.textContent = 'stopped';
+    badge.className = 'badge bg-secondary';
+    btn.textContent = 'Start';
+    btn.className = 'btn btn-sm btn-outline-success ms-auto';
+  }
+}
+
+async function togglePoll() {
+  const badge = document.getElementById('poll-status');
+  const isRunning = badge.textContent === 'running';
+  const endpoint = isRunning ? '/api/admin/poll/stop' : '/api/admin/poll/start';
+  await fetch(BACKEND + endpoint, {method: 'POST', credentials: 'include'});
+  loadPollStatus();
 }
 
 checkSession();

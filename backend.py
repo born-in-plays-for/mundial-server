@@ -1,7 +1,7 @@
 """
 backend.py — Flask backend for the Mundial app.
 
-- Polls API-Football every 60s during match window (18:00–20:00 Rome time)
+- Polls API-Football every 60s when polling is enabled (admin toggle)
 - Pushes live fixtures to clients via WebSocket ('live_update' event)
 - GET /api/live returns latest stored data (no API call)
 - GET /api/lineups/<id> fetches directly (lineups don't change mid-match)
@@ -18,16 +18,15 @@ Usage:
     python3 backend.py
 
 WebSocket events:
-    server → client: 'live_update'  [fixtures]  — every 60s during match window
-    server → client: 'user_login'   {user}
-    server → client: 'user_logout'  {user}
-    server → client: 'user_kicked'  {email, sid}
+    server → client: 'live_update'   [fixtures]       — every 60s when polling is on
+    server → client: 'poll_status'   {active: bool}   — when admin toggles polling
+    server → client: 'user_login'    {user}
+    server → client: 'user_logout'   {user}
+    server → client: 'user_kicked'   {email, sid}
 """
 
 import os, time, sys, json, uuid, re, logging
 from pathlib import Path
-from datetime import datetime
-from zoneinfo import ZoneInfo
 from flask import Flask, jsonify, request, session, send_file
 from flask_socketio import SocketIO
 
@@ -98,11 +97,7 @@ def _save_users(users):
 
 # ── API-Football ─────────────────────────────────────────────────────────────
 
-ROME_TZ = ZoneInfo("Europe/Rome")
 POLL_INTERVAL = 60  # seconds
-POLL_START_HOUR = 18
-POLL_END_HOUR = 20
-
 LATEST_FIXTURES = []  # most recent poll result
 POLL_ACTIVE = False
 _poll_thread = None
@@ -116,13 +111,8 @@ def api_get(path, params):
 
 def _poll_loop():
     global LATEST_FIXTURES, POLL_ACTIVE
-    log.info("POLL started (every %ds, %02d:00–%02d:00 Rome time)", POLL_INTERVAL, POLL_START_HOUR, POLL_END_HOUR)
+    log.info("POLL started (every %ds)", POLL_INTERVAL)
     while POLL_ACTIVE:
-        now_rome = datetime.now(ROME_TZ)
-        if now_rome.hour < POLL_START_HOUR or now_rome.hour >= POLL_END_HOUR:
-            log.debug("POLL outside window (%s), sleeping", now_rome.strftime("%H:%M"))
-            socketio.sleep(POLL_INTERVAL)
-            continue
         try:
             fixtures = api_get("/fixtures", {"live": "all"})
             wc = [f for f in fixtures if f["league"]["name"] == "World Cup"]
@@ -140,6 +130,8 @@ def start_polling():
         return False
     POLL_ACTIVE = True
     _poll_thread = socketio.start_background_task(_poll_loop)
+    log.info("POLL toggled ON")
+    socketio.emit("poll_status", {"active": True})
     return True
 
 def stop_polling():
@@ -147,6 +139,8 @@ def stop_polling():
     if not POLL_ACTIVE:
         return False
     POLL_ACTIVE = False
+    log.info("POLL toggled OFF")
+    socketio.emit("poll_status", {"active": False})
     return True
 
 @app.before_request
@@ -168,6 +162,10 @@ def cors(response):
     response.headers["Access-Control-Allow-Headers"] = "Content-Type, ngrok-skip-browser-warning"
     response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
     return response
+
+@app.route("/api/poll/active")
+def poll_active():
+    return jsonify({"active": POLL_ACTIVE})
 
 @app.route("/api/live")
 def live():
@@ -201,12 +199,9 @@ def admin_poll_status():
     user = session.get("user")
     if not user or user["email"] not in ADMIN_EMAILS:
         return jsonify({"error": "forbidden"}), 403
-    now_rome = datetime.now(ROME_TZ)
     return jsonify({
         "active": POLL_ACTIVE,
         "fixtures_count": len(LATEST_FIXTURES),
-        "rome_time": now_rome.strftime("%H:%M:%S"),
-        "window": f"{POLL_START_HOUR:02d}:00–{POLL_END_HOUR:02d}:00",
     })
 
 # ── Auth ─────────────────────────────────────────────────────────────────────
@@ -354,5 +349,4 @@ def admin_delete():
 if __name__ == "__main__":
     log.info("Proxy → %s", API_BASE)
     log.info("Admin emails: %s", ADMIN_EMAILS)
-    start_polling()
     socketio.run(app, host="0.0.0.0", port=5002, allow_unsafe_werkzeug=True)
