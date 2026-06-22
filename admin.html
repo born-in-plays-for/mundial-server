@@ -46,7 +46,10 @@ body { background: #f5f2ec; }
         <div class="card-body d-flex align-items-center gap-3">
           <span class="fw-bold">Live polling</span>
           <span id="poll-status" class="badge bg-secondary">unknown</span>
-          <button id="poll-toggle" class="btn btn-sm btn-outline-success ms-auto" onclick="togglePoll()">Start</button>
+          <span id="poll-fixtures" class="text-muted small"></span>
+          <button id="wc-filter" class="btn btn-sm btn-outline-warning ms-auto" onclick="toggleWcFilter()">WC only</button>
+          <button class="btn btn-sm btn-outline-info" onclick="discoverFixtures()">Discover</button>
+          <button id="poll-toggle" class="btn btn-sm btn-outline-success" onclick="togglePoll()">Start</button>
         </div>
       </div>
 
@@ -255,8 +258,8 @@ function connectWebSocket() {
     badge.className = 'badge bg-danger ms-auto';
   });
 
-  socket.on('poll_status', ({active}) => {
-    updatePollUI(active);
+  socket.on('poll_status', ({active, fixtures}) => {
+    updatePollUI(active, fixtures);
   });
 
   socket.on('user_login', user => {
@@ -304,23 +307,40 @@ async function loadPollStatus() {
     const r = await fetch(`${BACKEND}/api/admin/poll/status`, {credentials: 'include'});
     if (!r.ok) return;
     const data = await r.json();
-    updatePollUI(data.active);
+    updatePollUI(data.active, data.fixtures, data.wc_only);
   } catch {}
 }
 
-function updatePollUI(active) {
+function updatePollUI(active, fixtures, wcOnly) {
   const badge = document.getElementById('poll-status');
   const btn = document.getElementById('poll-toggle');
+  const fixturesEl = document.getElementById('poll-fixtures');
+  const wcBtn = document.getElementById('wc-filter');
+  const hasFixtures = fixtures && fixtures.length > 0;
   if (active) {
     badge.textContent = 'running';
     badge.className = 'badge bg-success';
     btn.textContent = 'Stop';
-    btn.className = 'btn btn-sm btn-outline-danger ms-auto';
+    btn.className = 'btn btn-sm btn-outline-danger';
+    btn.disabled = false;
   } else {
     badge.textContent = 'stopped';
     badge.className = 'badge bg-secondary';
     btn.textContent = 'Start';
-    btn.className = 'btn btn-sm btn-outline-success ms-auto';
+    btn.className = 'btn btn-sm btn-outline-success';
+    btn.disabled = !hasFixtures;
+  }
+  if (hasFixtures) {
+    fixturesEl.textContent = 'fixtures: ' + fixtures.join(', ');
+    fixturesEl.className = 'text-muted small';
+  } else {
+    fixturesEl.textContent = '';
+  }
+  if (wcOnly !== undefined) {
+    wcBtn.textContent = wcOnly ? 'WC only' : 'All leagues';
+    wcBtn.className = wcOnly
+      ? 'btn btn-sm btn-outline-warning ms-auto'
+      : 'btn btn-sm btn-warning ms-auto';
   }
 }
 
@@ -330,6 +350,46 @@ async function togglePoll() {
   const endpoint = isRunning ? '/api/admin/poll/stop' : '/api/admin/poll/start';
   await fetch(BACKEND + endpoint, {method: 'POST', credentials: 'include'});
   loadPollStatus();
+}
+
+async function toggleWcFilter() {
+  const r = await fetch(BACKEND + '/api/admin/poll/wc-filter', {method: 'POST', credentials: 'include'});
+  const data = await r.json();
+  if (data.ok) {
+    const wcBtn = document.getElementById('wc-filter');
+    wcBtn.textContent = data.wc_only ? 'WC only' : 'All leagues';
+    wcBtn.className = data.wc_only
+      ? 'btn btn-sm btn-outline-warning ms-auto'
+      : 'btn btn-sm btn-warning ms-auto';
+  }
+}
+
+async function discoverFixtures() {
+  const r = await fetch(BACKEND + '/api/admin/poll/discover', {method: 'POST', credentials: 'include'});
+  const data = await r.json();
+  const fixtures = data.fixtures ?? [];
+  const isRunning = document.getElementById('poll-status').textContent === 'running';
+  updatePollUI(isRunning, fixtures);
+  if (fixtures.length === 0) showToast('No live fixtures found');
+}
+
+function showToast(msg) {
+  let container = document.getElementById('toast-container');
+  if (!container) {
+    container = document.createElement('div');
+    container.id = 'toast-container';
+    container.className = 'position-fixed top-0 end-0 p-3';
+    container.style.zIndex = 1080;
+    document.body.appendChild(container);
+  }
+  const el = document.createElement('div');
+  el.className = 'toast align-items-center text-bg-warning border-0';
+  el.setAttribute('role', 'alert');
+  el.innerHTML = `<div class="d-flex"><div class="toast-body">${msg}</div><button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button></div>`;
+  container.appendChild(el);
+  const toast = new bootstrap.Toast(el, {delay: 3000});
+  toast.show();
+  el.addEventListener('hidden.bs.toast', () => el.remove());
 }
 
 checkSession();

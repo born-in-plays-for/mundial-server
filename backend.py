@@ -101,8 +101,10 @@ def _save_users(users):
 
 POLL_INTERVAL = 60  # seconds
 POLL_ACTIVE = False
+WC_ONLY = True
 _poll_thread = None
 POLLS_DIR = SERVER_DIR / "polls"
+KNOWN_FIXTURE_IDS = []
 
 def _load_latest_poll():
     if not POLLS_DIR.exists():
@@ -123,40 +125,77 @@ def api_get(path, params):
     r.raise_for_status()
     return r.json().get("response", [])
 
-def _save_poll(timestamp, fixtures, events_by_fixture):
+def _save_poll(timestamp, fixtures, events_by_fixture, statistics_by_fixture):
     POLLS_DIR.mkdir(exist_ok=True)
     record = {
         "timestamp": timestamp,
         "fixtures": fixtures,
         "events": {str(k): v for k, v in events_by_fixture.items()},
+        "statistics": {str(k): v for k, v in statistics_by_fixture.items()},
     }
     filename = POLLS_DIR / f"{timestamp.replace(':', '-')}.json"
     filename.write_text(json.dumps(record, indent=2, ensure_ascii=False))
     log.debug("POLL saved to %s", filename.name)
 
+def _fetch_fixture_detail(fid, path):
+    try:
+        return api_get(path, {"fixture": fid})
+    except Exception as e:
+        log.error("POLL %s error fixture %d: %s", path, fid, e)
+        return None
+
+def _discover_wc_fixtures():
+    global KNOWN_FIXTURE_IDS
+    fixtures = api_get("/fixtures", {"live": "all"})
+    if WC_ONLY:
+        matched = [f for f in fixtures if f["league"]["name"] == "World Cup"]
+    else:
+        matched = fixtures[:2]
+    ids = [f["fixture"]["id"] for f in matched]
+    KNOWN_FIXTURE_IDS = ids
+    label = "WC" if WC_ONLY else "all"
+    log.info("DISCOVERY (%s) → %d live fixtures, %d matched: %s", label, len(fixtures), len(ids), ids)
+    socketio.emit("poll_status", {"active": POLL_ACTIVE, "fixtures": KNOWN_FIXTURE_IDS, "wc_only": WC_ONLY})
+    return ids
+
 def _poll_loop():
     global LATEST_FIXTURES, POLL_ACTIVE
     log.info("POLL started (every %ds)", POLL_INTERVAL)
+    try:
+        _discover_wc_fixtures()
+    except Exception as e:
+        log.error("POLL discovery error: %s", e)
+    if not KNOWN_FIXTURE_IDS:
+        log.warning("POLL no WC fixtures found, stopping")
+        POLL_ACTIVE = False
+        socketio.emit("poll_status", {"active": False, "fixtures": []})
+        return
     while POLL_ACTIVE:
         try:
             ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-            fixtures = api_get("/fixtures", {"live": "all"})
-            wc = [f for f in fixtures if f["league"]["name"] == "World Cup"]
+            wc = []
             events_by_fixture = {}
-            for f in wc:
-                fid = f["fixture"]["id"]
-                try:
-                    events_by_fixture[fid] = api_get("/fixtures/events", {"fixture": fid})
-                except Exception as e:
-                    log.error("POLL events error fixture %d: %s", fid, e)
+            statistics_by_fixture = {}
+            for fid in KNOWN_FIXTURE_IDS:
+                fixture_data = _fetch_fixture_detail(fid, "/fixtures")
+                if fixture_data and len(fixture_data) > 0:
+                    wc.append(fixture_data[0])
+                events = _fetch_fixture_detail(fid, "/fixtures/events")
+                if events is not None:
+                    events_by_fixture[fid] = events
+                stats = _fetch_fixture_detail(fid, "/fixtures/statistics")
+                if stats is not None:
+                    statistics_by_fixture[fid] = stats
             for f in wc:
                 fid = f["fixture"]["id"]
                 if fid in events_by_fixture:
                     f["events"] = events_by_fixture[fid]
+                if fid in statistics_by_fixture:
+                    f["statistics"] = statistics_by_fixture[fid]
             LATEST_FIXTURES = wc
-            _save_poll(ts, wc, events_by_fixture)
-            log.info("POLL → %d fixtures (%d WC, %d event queries), emitting live_update",
-                     len(fixtures), len(wc), len(events_by_fixture))
+            _save_poll(ts, wc, events_by_fixture, statistics_by_fixture)
+            log.info("POLL → %d WC fixtures, %d API calls, emitting live_update",
+                     len(wc), len(KNOWN_FIXTURE_IDS) * 3)
             socketio.emit("live_update", wc)
         except Exception as e:
             log.error("POLL error: %s", e)
@@ -170,7 +209,6 @@ def start_polling():
     POLL_ACTIVE = True
     _poll_thread = socketio.start_background_task(_poll_loop)
     log.info("POLL toggled ON")
-    socketio.emit("poll_status", {"active": True})
     return True
 
 def stop_polling():
@@ -179,7 +217,7 @@ def stop_polling():
         return False
     POLL_ACTIVE = False
     log.info("POLL toggled OFF")
-    socketio.emit("poll_status", {"active": False})
+    socketio.emit("poll_status", {"active": False, "fixtures": []})
     return True
 
 @app.before_request
@@ -204,7 +242,7 @@ def cors(response):
 
 @app.route("/api/poll/active")
 def poll_active():
-    return jsonify({"active": POLL_ACTIVE})
+    return jsonify({"active": POLL_ACTIVE, "fixtures": KNOWN_FIXTURE_IDS})
 
 @app.route("/api/live")
 def live():
@@ -241,9 +279,33 @@ def admin_poll_status():
     poll_count = len(list(POLLS_DIR.glob("*.json"))) if POLLS_DIR.exists() else 0
     return jsonify({
         "active": POLL_ACTIVE,
+        "wc_only": WC_ONLY,
+        "fixtures": KNOWN_FIXTURE_IDS,
         "fixtures_count": len(LATEST_FIXTURES),
         "saved_polls": poll_count,
     })
+
+@app.route("/api/admin/poll/wc-filter", methods=["POST"])
+def admin_poll_wc_filter():
+    global WC_ONLY
+    user = session.get("user")
+    if not user or user["email"] not in ADMIN_EMAILS:
+        return jsonify({"error": "forbidden"}), 403
+    WC_ONLY = not WC_ONLY
+    log.info("WC filter toggled: %s", "ON" if WC_ONLY else "OFF")
+    return jsonify({"ok": True, "wc_only": WC_ONLY})
+
+@app.route("/api/admin/poll/discover", methods=["POST"])
+def admin_poll_discover():
+    user = session.get("user")
+    if not user or user["email"] not in ADMIN_EMAILS:
+        return jsonify({"error": "forbidden"}), 403
+    try:
+        ids = _discover_wc_fixtures()
+        return jsonify({"ok": True, "fixtures": ids})
+    except Exception as e:
+        log.error("DISCOVERY error: %s", e)
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/api/admin/polls")
 def admin_polls_list():
