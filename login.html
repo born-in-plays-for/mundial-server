@@ -97,7 +97,7 @@ checkSession();
 </script>
 <script src="https://cdn.jsdelivr.net/npm/socket.io-client@4/dist/socket.io.min.js"></script>
 <script>
-const _sock = io(document.location.origin, {transports: ['websocket']});
+const _sock = io(document.location.origin);
 _sock.on('user_kicked', ({email}) => {
   const cur = document.getElementById('user-email')?.textContent;
   if (cur === email) {

@@ -251,6 +251,8 @@ function connectWebSocket() {
   socket.on('connect', () => {
     badge.textContent = 'live';
     badge.className = 'badge bg-success ms-auto';
+    loadUsers();
+    loadPollStatus();
   });
 
   socket.on('disconnect', () => {

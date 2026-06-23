@@ -177,7 +177,11 @@ def _poll_loop():
             events_by_fixture = {}
             statistics_by_fixture = {}
             for fid in KNOWN_FIXTURE_IDS:
-                fixture_data = _fetch_fixture_detail(fid, "/fixtures")
+                try:
+                    fixture_data = api_get("/fixtures", {"id": fid})
+                except Exception as e:
+                    log.error("POLL /fixtures error fixture %d: %s", fid, e)
+                    fixture_data = None
                 if fixture_data and len(fixture_data) > 0:
                     wc.append(fixture_data[0])
                 events = _fetch_fixture_detail(fid, "/fixtures/events")
@@ -468,6 +472,12 @@ def admin_delete():
     log.info("DELETE %s (removed from users.json + all sessions)", email)
     socketio.emit("user_deleted", {"email": email})
     return jsonify({"ok": True})
+
+class _WsUpgradeFilter(logging.Filter):
+    def filter(self, record):
+        return "write() before start_response" not in record.getMessage()
+
+logging.getLogger("werkzeug").addFilter(_WsUpgradeFilter())
 
 if __name__ == "__main__":
     log.info("Proxy → %s", API_BASE)
