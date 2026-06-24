@@ -149,6 +149,24 @@ def _fetch_standings():
         log.warning("Failed to fetch standings: %s", e)
     return _STANDINGS_CACHE["data"] or []
 
+_RESULTS_CACHE = {"data": None, "ts": 0}
+
+def _fetch_group_results():
+    now = _time.time()
+    if _RESULTS_CACHE["data"] and now - _RESULTS_CACHE["ts"] < _STANDINGS_TTL:
+        return _RESULTS_CACHE["data"]
+    try:
+        fixtures = []
+        for rd in range(1, 4):
+            fixtures += api_get("/fixtures", {"league": 1, "season": 2026, "round": f"Group Stage - {rd}"})
+        finished = [f for f in fixtures if f["fixture"]["status"]["short"] == "FT"]
+        _RESULTS_CACHE["data"] = finished
+        _RESULTS_CACHE["ts"] = now
+        log.info("Fetched group results: %d finished fixtures", len(finished))
+    except Exception as e:
+        log.warning("Failed to fetch group results: %s", e)
+    return _RESULTS_CACHE["data"] or []
+
 def api_get(path, params):
     url = f"{API_BASE}{path}"
     log.info("API REQUEST %s %s", path, params)
@@ -289,6 +307,12 @@ def standings():
     groups = _fetch_standings()
     log.info("GET /api/standings → %d groups", len(groups))
     return jsonify(groups)
+
+@app.route("/api/group-results")
+def group_results():
+    results = _fetch_group_results()
+    log.info("GET /api/group-results → %d fixtures", len(results))
+    return jsonify(results)
 
 @app.route("/api/lineups/<int:fixture_id>")
 def lineups(fixture_id):
