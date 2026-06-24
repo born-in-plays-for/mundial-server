@@ -8,6 +8,14 @@ Backend for the Mundial app: API-Football proxy, Google Sign-In authentication, 
 pip install flask flask-socketio requests
 ```
 
+### Environment variables
+
+| Variable | Required | Description |
+|---|---|---|
+| `API_FOOTBALL_KEY` | yes | API-Football key, or `mock` for development |
+| `API_FOOTBALL_URL` | no | Override API base URL (default: `https://v3.football.api-sports.io`) |
+| `FLASK_SECRET` | no | Fixed session signing key. If unset, a key is auto-generated and saved to `.flask_secret` on first run — sessions survive restarts either way |
+
 ## Files
 
 | File | Purpose |
@@ -18,6 +26,8 @@ pip install flask flask-socketio requests
 | `login.html` | Standalone Google Sign-In page (also used as popup from the map page) |
 | `start.sh` | One-command startup: backend + ngrok + auto-publish URL to GitHub Pages |
 | `users.json` | Persisted user history (gitignored) |
+| `polls/` | Saved poll snapshots — one JSON per tick (gitignored) |
+| `.flask_secret` | Auto-generated session signing key (gitignored) |
 | `client_secret_*.json` | Google OAuth secret (gitignored) |
 
 ## Quick start
@@ -49,7 +59,7 @@ python3 server/backend.py
 ngrok http 5002
 ```
 
-Free API key: https://dashboard.api-football.com/register (100 requests/day, live endpoints only).
+API key: https://dashboard.api-football.com/register — free tier gives 100 requests/day; paid plan gives 7500/day.
 Dashboard (usage stats, key): https://dashboard.api-football.com/
 
 ## URLs
@@ -75,8 +85,9 @@ Dashboard (usage stats, key): https://dashboard.api-football.com/
 
 | Route | Method | Description |
 |---|---|---|
-| `/api/live` | GET | Live World Cup fixtures (proxied from API-Football) |
-| `/api/lineups/<id>` | GET | Starting XI + substitutes for a fixture |
+| `/api/poll/active` | GET | Check if polling is active + tracked fixture IDs |
+| `/api/live` | GET | Latest stored fixtures (no API call) |
+| `/api/lineups/<id>` | GET | Starting XI + substitutes for a fixture (fetched on demand) |
 | `/api/auth/google` | POST | Verify Google Sign-In token, create session |
 | `/api/auth/me` | GET | Current user from session |
 | `/api/auth/logout` | POST | Clear session (accepts `{sid, email}` in body) |
@@ -85,14 +96,25 @@ Dashboard (usage stats, key): https://dashboard.api-football.com/
 | `/api/admin/users` | GET | List all known users (admin only) |
 | `/api/admin/online` | GET | List active sessions with device info (admin only) |
 | `/api/admin/kick` | POST | Force-logout a session by `{sid}` or all sessions by `{email}` (admin only) |
+| `/api/admin/delete` | POST | Delete a user from `users.json` and kick all their sessions (admin only) |
+| `/api/admin/poll/start` | POST | Start API-Football polling loop (admin only) |
+| `/api/admin/poll/stop` | POST | Stop polling loop (admin only) |
+| `/api/admin/poll/status` | GET | Polling state: active, WC filter, fixture count, saved polls (admin only) |
+| `/api/admin/poll/wc-filter` | POST | Toggle World Cup–only fixture filter (admin only) |
+| `/api/admin/poll/discover` | POST | Re-run fixture discovery (admin only) |
+| `/api/admin/polls` | GET | List saved poll filenames (admin only) |
+| `/api/admin/polls/<name>` | GET | Get a specific saved poll by name (admin only) |
 
 ### WebSocket events
 
 | Event | Direction | Payload |
 |---|---|---|
+| `live_update` | server → client | `[fixtures]` — every 60s when polling is on |
+| `poll_status` | server → client | `{active, fixtures, wc_only}` — when admin toggles polling or discovery runs |
 | `user_login` | server → client | `{email, name, picture, last_login, device, sid}` |
-| `user_logout` | server → client | `{email, name, picture}` |
+| `user_logout` | server → client | `{email, name, picture, sid}` |
 | `user_kicked` | server → client | `{email, sid?}` — if `sid` is present, only that session is kicked |
+| `user_deleted` | server → client | `{email}` — user removed from `users.json` |
 
 ## Authentication
 
@@ -135,9 +157,24 @@ Kicking a session by `sid` only logs out that specific browser. Kicking by `emai
 
 The map page and backend run on different origins. Since cross-origin cookies don't travel, the frontend stores `{user, admin, sid}` in `localStorage` after sign-in. The session ID is also stored separately as `mundial_sid` for logout/kick matching.
 
+### Session persistence
+
+Sessions use Flask's default signed-cookie mechanism. The signing key is stable across restarts: if `FLASK_SECRET` is set, it's used; otherwise a random key is generated once and saved to `.flask_secret`. This means authenticated users stay logged in after a server reboot — no Redis or database needed.
+
 ### Auth bar auto-hide
 
 The map page hides the auth bar by default. On load, it pings the backend (3-second timeout). If the backend is unreachable, the auth bar stays hidden and the page works exactly as before — no broken UI.
+
+## API-Football polling
+
+When an admin starts polling, the backend:
+
+1. **Discovery** — fetches all live fixtures, filters to World Cup only (toggleable via WC filter)
+2. **Poll loop** — every 60s, fetches fixture data, events, and statistics for each tracked fixture (3 API calls per fixture per tick)
+3. **Broadcast** — emits `live_update` to all connected clients via WebSocket
+4. **Save** — writes each poll to `polls/` as a timestamped JSON file (fixtures + events + statistics)
+
+On startup, the latest saved poll is loaded so `/api/live` always has data even before polling starts.
 
 ## Architecture
 
