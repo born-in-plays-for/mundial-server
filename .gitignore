@@ -5,3 +5,4 @@ backend.log
 users.json
 client_secret_*.json
 polls/
+.flask_secret

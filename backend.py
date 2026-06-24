@@ -54,7 +54,20 @@ ADMIN_EMAILS = {"christophe.t60@gmail.com"}
 import requests as req
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("FLASK_SECRET", os.urandom(32))
+
+def _stable_secret_key():
+    env = os.environ.get("FLASK_SECRET")
+    if env:
+        return env
+    key_file = Path(__file__).parent / ".flask_secret"
+    if key_file.exists():
+        return key_file.read_bytes()
+    key = os.urandom(32)
+    key_file.write_bytes(key)
+    key_file.chmod(0o600)
+    return key
+
+app.secret_key = _stable_secret_key()
 socketio = SocketIO(app, cors_allowed_origins="*")
 
 SERVER_DIR = Path(__file__).parent
