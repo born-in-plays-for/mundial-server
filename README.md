@@ -1,6 +1,6 @@
-# server/
+# mundial-server
 
-Backend for the Mundial app: API-Football proxy, Google Sign-In authentication, admin dashboard with live WebSocket updates, per-device session tracking, and force-kick.
+Backend for the [Born In, Plays For](https://github.com/born-in-plays-for) project: API-Football proxy, Google Sign-In authentication, admin dashboard with live WebSocket updates, per-device session tracking, and force-kick.
 
 ## Setup
 
@@ -247,3 +247,10 @@ API_FOOTBALL_KEY=mock ./server/start.sh
 ### WiFi access
 
 The backend binds to `0.0.0.0`, so other devices on your WiFi can reach it via your local IP (e.g. `http://192.168.1.54:5002`). Google Sign-In won't work from a private IP — use ngrok for auth testing from other devices.
+
+## See also
+
+- [born-in-plays-for](https://github.com/born-in-plays-for) — org overview + architecture diagram
+- [mundial](https://github.com/born-in-plays-for/mundial) — frontend
+- [mundial-data](https://github.com/born-in-plays-for/mundial-data) — shared data files
+- [mundial-build](https://github.com/born-in-plays-for/mundial-build) — data pipeline
