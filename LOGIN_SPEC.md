@@ -157,9 +157,9 @@ All events are broadcast to every connected WebSocket client.
 
 ### Ghost sessions (after backend restart)
 
-**Cause:** `ONLINE_SESSIONS` is in-memory and lost on restart. Flask session cookies (signed, stored client-side) survive the restart if `FLASK_SECRET` is stable (currently `os.urandom(32)` by default — changes on every restart).
+**Cause:** `ONLINE_SESSIONS` is in-memory and lost on restart. Flask session cookies survive (the signing key is stable — auto-generated once and saved to `.flask_secret`), but the server no longer has a matching tracking entry.
 
-**Symptom:** The map page shows "signed in" (from `localStorage`) but the backend has no `ONLINE_SESSIONS` entry. The admin page may show "signed in" (from a still-valid Flask cookie) but the user doesn't appear in the users table.
+**Symptom:** The map page shows "signed in" (from `localStorage`) but the backend has no `ONLINE_SESSIONS` entry. The admin page may show "signed in" (from a still-valid Flask cookie) but the user doesn't appear in the online sessions table.
 
 **Current behavior:** Logout from a ghost session logs a `WARNING: LOGOUT with no matching session`. The user must sign out and sign back in to create a fresh `ONLINE_SESSIONS` entry.
 
@@ -209,6 +209,6 @@ Self-protection:
 | Data | Storage | Survives restart? | Survives browser close? |
 |---|---|---|---|
 | `ONLINE_SESSIONS` | Python dict (RAM) | No | N/A (server-side) |
-| Flask session cookie | Signed cookie (browser) | Only if `FLASK_SECRET` is stable | Yes (session cookie) |
+| Flask session cookie | Signed cookie (browser) | Yes (key persisted in `.flask_secret`) | Yes (session cookie) |
 | `localStorage` (map) | Browser storage | N/A (client-side) | Yes |
 | `users.json` | File on disk | Yes | N/A (server-side) |
