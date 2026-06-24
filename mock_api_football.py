@@ -211,6 +211,42 @@ MOCK_LINEUPS = {
     ]
 }
 
+def _team_standing(rank, team_id, name, played, win, draw, lose, gf, ga):
+    pts = win * 3 + draw
+    return {
+        "rank": rank,
+        "team": {"id": team_id, "name": name, "logo": f"https://media.api-sports.io/football/teams/{team_id}.png"},
+        "points": pts,
+        "goalsDiff": gf - ga,
+        "group": None,  # set by caller
+        "form": None,
+        "status": "same",
+        "description": "Promotion - World Cup (Knockout stage)" if rank <= 2 else None,
+        "all": {"played": played, "win": win, "draw": draw, "lose": lose, "goals": {"for": gf, "against": ga}},
+    }
+
+MOCK_STANDINGS = [
+    {
+        "league": {
+            "id": 1, "name": "World Cup", "country": "World", "season": 2026,
+            "standings": [
+                [  # Group E — matchday 1 results: France 3-1 Japan, Colombia 2-0 Senegal
+                    {**_team_standing(1, 2, "France", 1, 1, 0, 0, 3, 1), "group": "Group E"},
+                    {**_team_standing(2, 1530, "Colombia", 1, 1, 0, 0, 2, 0), "group": "Group E"},
+                    {**_team_standing(3, 12, "Japan", 1, 0, 0, 1, 1, 3), "group": "Group E"},
+                    {**_team_standing(4, 1569, "Senegal", 1, 0, 0, 1, 0, 2), "group": "Group E"},
+                ],
+                [  # Group F — matchday 1 results: Germany 2-2 South Korea, Ivory Coast 1-0 Morocco
+                    {**_team_standing(1, 108, "Ivory Coast", 1, 1, 0, 0, 1, 0), "group": "Group F"},
+                    {**_team_standing(2, 25, "Germany", 1, 0, 1, 0, 2, 2), "group": "Group F"},
+                    {**_team_standing(3, 17, "South Korea", 1, 0, 1, 0, 2, 2), "group": "Group F"},
+                    {**_team_standing(4, 31, "Morocco", 1, 0, 0, 1, 0, 1), "group": "Group F"},
+                ],
+            ]
+        }
+    }
+]
+
 @app.route("/fixtures")
 def fixtures():
     return jsonify({"response": MOCK_FIXTURES})
@@ -220,6 +256,10 @@ def lineups():
     from flask import request
     fixture_id = request.args.get("fixture", type=int)
     return jsonify({"response": MOCK_LINEUPS.get(fixture_id, [])})
+
+@app.route("/standings")
+def standings():
+    return jsonify({"response": MOCK_STANDINGS})
 
 if __name__ == "__main__":
     print("Mock API-Football server on port 5003 — 2 fake WC matches (GER-CIV, FRA-COL)")

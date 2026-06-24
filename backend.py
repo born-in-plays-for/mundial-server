@@ -131,6 +131,24 @@ def _load_latest_poll():
 
 LATEST_FIXTURES = _load_latest_poll()
 
+import time as _time
+_STANDINGS_CACHE = {"data": None, "ts": 0}
+_STANDINGS_TTL = 300  # 5 minutes
+
+def _fetch_standings():
+    now = _time.time()
+    if _STANDINGS_CACHE["data"] and now - _STANDINGS_CACHE["ts"] < _STANDINGS_TTL:
+        return _STANDINGS_CACHE["data"]
+    try:
+        raw = api_get("/standings", {"league": 1, "season": 2026})
+        groups = raw[0]["league"]["standings"] if raw else []
+        _STANDINGS_CACHE["data"] = groups
+        _STANDINGS_CACHE["ts"] = now
+        log.info("Fetched standings: %d groups", len(groups))
+    except Exception as e:
+        log.warning("Failed to fetch standings: %s", e)
+    return _STANDINGS_CACHE["data"] or []
+
 def api_get(path, params):
     url = f"{API_BASE}{path}"
     log.info("API REQUEST %s %s", path, params)
@@ -265,6 +283,12 @@ def poll_active():
 def live():
     log.info("GET /api/live → returning %d stored fixtures", len(LATEST_FIXTURES))
     return jsonify(LATEST_FIXTURES)
+
+@app.route("/api/standings")
+def standings():
+    groups = _fetch_standings()
+    log.info("GET /api/standings → %d groups", len(groups))
+    return jsonify(groups)
 
 @app.route("/api/lineups/<int:fixture_id>")
 def lineups(fixture_id):
