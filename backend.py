@@ -121,7 +121,8 @@ WC_ONLY = True
 _discover_thread = None
 _track_thread = None
 POLLS_DIR = SERVER_DIR / "polls"
-KNOWN_FIXTURE_IDS = []
+KNOWN_FIXTURES = {}  # {fid: {"tracked": bool, "label": str, "status": str}}
+ACTIVE_STATUSES = {"1H", "2H", "ET", "P"}
 
 def _load_latest_poll():
     if not POLLS_DIR.exists():
@@ -201,21 +202,48 @@ def _emit_status():
     socketio.emit("poll_status", {
         "discovering": DISCOVER_ACTIVE,
         "tracking": TRACK_ACTIVE,
-        "fixtures": KNOWN_FIXTURE_IDS,
+        "fixtures": {
+            str(fid): info for fid, info in KNOWN_FIXTURES.items()
+        },
         "wc_only": WC_ONLY,
     })
 
+def _fixture_label(f):
+    home = f.get("teams", {}).get("home", {}).get("name", "?")
+    away = f.get("teams", {}).get("away", {}).get("name", "?")
+    return f"{home} vs {away}"
+
 def _discover_wc_fixtures():
-    global KNOWN_FIXTURE_IDS
+    global KNOWN_FIXTURES
+    had_tracked = any(info["tracked"] for info in KNOWN_FIXTURES.values())
     fixtures = api_get("/fixtures", {"live": "all"})
     if WC_ONLY:
         matched = [f for f in fixtures if f["league"]["name"] == "World Cup"]
     else:
         matched = fixtures[:2]
-    ids = [f["fixture"]["id"] for f in matched]
-    KNOWN_FIXTURE_IDS = ids
+    new_ids = {f["fixture"]["id"] for f in matched}
+    for f in matched:
+        fid = f["fixture"]["id"]
+        if fid not in KNOWN_FIXTURES:
+            KNOWN_FIXTURES[fid] = {
+                "tracked": TRACK_ACTIVE,
+                "label": _fixture_label(f),
+                "status": f["fixture"]["status"]["short"],
+            }
+        else:
+            KNOWN_FIXTURES[fid]["label"] = _fixture_label(f)
+            KNOWN_FIXTURES[fid]["status"] = f["fixture"]["status"]["short"]
+    for fid in list(KNOWN_FIXTURES):
+        if fid not in new_ids:
+            del KNOWN_FIXTURES[fid]
     label = "WC" if WC_ONLY else "all"
+    ids = list(new_ids)
     log.info("DISCOVER (%s) → %d live fixtures, %d matched: %s", label, len(fixtures), len(ids), ids)
+    has_tracked = any(info["tracked"] for info in KNOWN_FIXTURES.values())
+    if has_tracked and not had_tracked and TRACK_ACTIVE and _track_thread is None:
+        _start_track_thread()
+    elif not has_tracked and had_tracked and _track_thread is not None:
+        _stop_track_thread()
     _emit_status()
     return ids
 
@@ -231,11 +259,12 @@ def _discover_loop():
     log.info("DISCOVER loop stopped")
 
 def _track_loop():
-    global LATEST_FIXTURES, TRACK_ACTIVE
+    global LATEST_FIXTURES, _track_thread
     log.info("TRACK loop started (every %ds)", TRACK_INTERVAL)
     while TRACK_ACTIVE:
-        if not KNOWN_FIXTURE_IDS:
-            log.debug("TRACK tick — no fixtures to track")
+        tracked_ids = [fid for fid, info in KNOWN_FIXTURES.items() if info["tracked"]]
+        if not tracked_ids:
+            log.debug("TRACK tick — no tracked fixtures")
             socketio.sleep(TRACK_INTERVAL)
             continue
         try:
@@ -243,20 +272,31 @@ def _track_loop():
             wc = []
             events_by_fixture = {}
             statistics_by_fixture = {}
-            for fid in KNOWN_FIXTURE_IDS:
+            api_calls = 0
+            for fid in tracked_ids:
                 try:
                     fixture_data = api_get("/fixtures", {"id": fid})
+                    api_calls += 1
                 except Exception as e:
                     log.error("TRACK /fixtures error fixture %d: %s", fid, e)
                     fixture_data = None
                 if fixture_data and len(fixture_data) > 0:
-                    wc.append(fixture_data[0])
-                events = _fetch_fixture_detail(fid, "/fixtures/events")
-                if events is not None:
-                    events_by_fixture[fid] = events
-                stats = _fetch_fixture_detail(fid, "/fixtures/statistics")
-                if stats is not None:
-                    statistics_by_fixture[fid] = stats
+                    f = fixture_data[0]
+                    wc.append(f)
+                    status = f["fixture"]["status"]["short"]
+                    if fid in KNOWN_FIXTURES:
+                        KNOWN_FIXTURES[fid]["status"] = status
+                    if status in ACTIVE_STATUSES:
+                        events = _fetch_fixture_detail(fid, "/fixtures/events")
+                        api_calls += 1
+                        if events is not None:
+                            events_by_fixture[fid] = events
+                        stats = _fetch_fixture_detail(fid, "/fixtures/statistics")
+                        api_calls += 1
+                        if stats is not None:
+                            statistics_by_fixture[fid] = stats
+                    else:
+                        log.info("TRACK fixture %d — skipping events/stats (status: %s)", fid, status)
             for f in wc:
                 fid = f["fixture"]["id"]
                 if fid in events_by_fixture:
@@ -266,12 +306,25 @@ def _track_loop():
             LATEST_FIXTURES = wc
             _save_poll(ts, wc, events_by_fixture, statistics_by_fixture)
             log.info("TRACK → %d fixtures, %d API calls, emitting live_update",
-                     len(wc), len(KNOWN_FIXTURE_IDS) * 3)
+                     len(wc), api_calls)
             socketio.emit("live_update", wc)
+            _emit_status()
         except Exception as e:
             log.error("TRACK error: %s", e)
         socketio.sleep(TRACK_INTERVAL)
+    _track_thread = None
     log.info("TRACK loop stopped")
+
+def _start_track_thread():
+    global _track_thread
+    if _track_thread is not None:
+        return
+    _track_thread = socketio.start_background_task(_track_loop)
+    log.info("TRACK thread spawned")
+
+def _stop_track_thread():
+    global _track_thread
+    _track_thread = None
 
 def start_discovering():
     global DISCOVER_ACTIVE, _discover_thread
@@ -293,12 +346,16 @@ def stop_discovering():
     return True
 
 def start_tracking():
-    global TRACK_ACTIVE, _track_thread
+    global TRACK_ACTIVE
     if TRACK_ACTIVE:
         return False
     TRACK_ACTIVE = True
-    _track_thread = socketio.start_background_task(_track_loop)
     log.info("TRACK toggled ON")
+    has_tracked = any(info["tracked"] for info in KNOWN_FIXTURES.values())
+    if has_tracked:
+        _start_track_thread()
+    else:
+        log.info("TRACK armed — will start when fixtures are discovered")
     _emit_status()
     return True
 
@@ -333,7 +390,7 @@ def cors(response):
 
 @app.route("/api/poll/active")
 def poll_active():
-    return jsonify({"discovering": DISCOVER_ACTIVE, "tracking": TRACK_ACTIVE, "fixtures": KNOWN_FIXTURE_IDS})
+    return jsonify({"discovering": DISCOVER_ACTIVE, "tracking": TRACK_ACTIVE, "fixtures": list(KNOWN_FIXTURES.keys())})
 
 @app.route("/api/live")
 def live():
@@ -390,6 +447,39 @@ def admin_track_stop():
     stopped = stop_tracking()
     return jsonify({"ok": True, "stopped": stopped, "was_running": stopped})
 
+@app.route("/api/admin/track/fixture", methods=["POST"])
+def admin_track_fixture():
+    user = session.get("user")
+    if not user or user["email"] not in ADMIN_EMAILS:
+        return jsonify({"error": "forbidden"}), 403
+    fid = request.json.get("fid")
+    tracked = request.json.get("tracked")
+    if fid is None or tracked is None:
+        return jsonify({"error": "missing fid or tracked"}), 400
+    fid = int(fid)
+    if fid not in KNOWN_FIXTURES:
+        return jsonify({"error": "unknown fixture"}), 404
+    KNOWN_FIXTURES[fid]["tracked"] = bool(tracked)
+    log.info("TRACK fixture %d → %s", fid, "on" if tracked else "off")
+    if TRACK_ACTIVE and tracked and _track_thread is None:
+        _start_track_thread()
+    _emit_status()
+    return jsonify({"ok": True})
+
+@app.route("/api/admin/track/all", methods=["POST"])
+def admin_track_all():
+    user = session.get("user")
+    if not user or user["email"] not in ADMIN_EMAILS:
+        return jsonify({"error": "forbidden"}), 403
+    tracked = bool(request.json.get("tracked", True))
+    for info in KNOWN_FIXTURES.values():
+        info["tracked"] = tracked
+    log.info("TRACK all fixtures → %s", "on" if tracked else "off")
+    if TRACK_ACTIVE and tracked and KNOWN_FIXTURES and _track_thread is None:
+        _start_track_thread()
+    _emit_status()
+    return jsonify({"ok": True})
+
 @app.route("/api/admin/poll/status")
 def admin_poll_status():
     user = session.get("user")
@@ -400,7 +490,9 @@ def admin_poll_status():
         "discovering": DISCOVER_ACTIVE,
         "tracking": TRACK_ACTIVE,
         "wc_only": WC_ONLY,
-        "fixtures": KNOWN_FIXTURE_IDS,
+        "fixtures": {
+            str(fid): info for fid, info in KNOWN_FIXTURES.items()
+        },
         "fixtures_count": len(LATEST_FIXTURES),
         "saved_polls": poll_count,
     })

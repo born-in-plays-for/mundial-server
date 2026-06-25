@@ -47,7 +47,6 @@ body { background: #f5f2ec; }
           <div class="d-flex align-items-center gap-3">
             <span class="fw-bold">Discover</span>
             <span id="discover-status" class="badge bg-secondary">off</span>
-            <span id="poll-fixtures" class="text-muted small"></span>
             <button id="wc-filter" class="btn btn-sm btn-outline-warning ms-auto" onclick="toggleWcFilter()">WC only</button>
             <button class="btn btn-sm btn-outline-info" onclick="discoverFixtures()">Once</button>
             <button id="discover-toggle" class="btn btn-sm btn-outline-success" onclick="toggleDiscover()">Start</button>
@@ -57,6 +56,7 @@ body { background: #f5f2ec; }
             <span id="track-status" class="badge bg-secondary">off</span>
             <button id="track-toggle" class="btn btn-sm btn-outline-success ms-auto" onclick="toggleTrack()">Start</button>
           </div>
+          <div id="fixture-list"></div>
         </div>
       </div>
 
@@ -336,16 +336,45 @@ function updateToggle(badgeId, btnId, active) {
   }
 }
 
+const STATUS_COLORS = {
+  '1H': 'bg-success', '2H': 'bg-success', 'ET': 'bg-success', 'P': 'bg-success',
+  'HT': 'bg-warning text-dark', 'BT': 'bg-warning text-dark',
+  'FT': 'bg-secondary', 'AET': 'bg-secondary', 'PEN': 'bg-secondary',
+};
+
+function renderFixtures(fixtures) {
+  const el = document.getElementById('fixture-list');
+  const entries = Object.entries(fixtures || {});
+  if (entries.length === 0) {
+    el.innerHTML = '<div class="text-muted small mt-1">No fixtures discovered.</div>';
+    return;
+  }
+  const anyTracked = entries.some(([, f]) => f.tracked);
+  const allTracked = entries.every(([, f]) => f.tracked);
+  el.innerHTML = `
+    <div class="d-flex gap-2 mt-2 mb-1">
+      <button class="btn btn-sm btn-outline-success" onclick="trackAll(true)" ${allTracked ? 'disabled' : ''}>Start all</button>
+      <button class="btn btn-sm btn-outline-danger" onclick="trackAll(false)" ${!anyTracked ? 'disabled' : ''}>Stop all</button>
+    </div>` +
+    entries.map(([fid, f]) => {
+      const statusCls = STATUS_COLORS[f.status] || 'bg-info';
+      const trackedCls = f.tracked ? 'bg-success' : 'bg-secondary';
+      const btnCls = f.tracked ? 'btn-outline-danger' : 'btn-outline-success';
+      const btnLabel = f.tracked ? 'Stop' : 'Start';
+      return `
+    <div class="d-flex align-items-center gap-2 py-1" style="font-size:13px">
+      <span>${f.label}</span>
+      <span class="badge ${statusCls}">${f.status || '?'}</span>
+      <span class="badge ${trackedCls}">${f.tracked ? 'on' : 'off'}</span>
+      <button class="btn btn-sm ${btnCls} ms-auto py-0 px-2" style="font-size:11px" onclick="trackFixture(${fid}, ${!f.tracked})">${btnLabel}</button>
+    </div>`;
+    }).join('');
+}
+
 function updatePollUI({discovering, tracking, fixtures, wc_only}) {
   updateToggle('discover-status', 'discover-toggle', discovering);
   updateToggle('track-status', 'track-toggle', tracking);
-  const fixturesEl = document.getElementById('poll-fixtures');
-  if (fixtures && fixtures.length > 0) {
-    fixturesEl.textContent = 'fixtures: ' + fixtures.join(', ');
-    fixturesEl.className = 'text-muted small';
-  } else {
-    fixturesEl.textContent = '';
-  }
+  renderFixtures(fixtures);
   if (wc_only !== undefined) {
     const wcBtn = document.getElementById('wc-filter');
     wcBtn.textContent = wc_only ? 'WC only' : 'All leagues';
@@ -379,6 +408,24 @@ async function toggleWcFilter() {
       ? 'btn btn-sm btn-outline-warning ms-auto'
       : 'btn btn-sm btn-warning ms-auto';
   }
+}
+
+async function trackFixture(fid, tracked) {
+  await fetch(BACKEND + '/api/admin/track/fixture', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    credentials: 'include',
+    body: JSON.stringify({fid, tracked})
+  });
+}
+
+async function trackAll(tracked) {
+  await fetch(BACKEND + '/api/admin/track/all', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    credentials: 'include',
+    body: JSON.stringify({tracked})
+  });
 }
 
 async function discoverFixtures() {

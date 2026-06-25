@@ -99,9 +99,11 @@ Dashboard (usage stats, key): https://dashboard.api-football.com/
 | `/api/admin/delete` | POST | Delete a user from `users.json` and kick all their sessions (admin only) |
 | `/api/admin/poll/start` | POST | Start discovery loop — polls API-Football for live fixtures (admin only) |
 | `/api/admin/poll/stop` | POST | Stop discovery loop (admin only) |
-| `/api/admin/track/start` | POST | Start tracking loop — fetches updates for known fixtures (admin only) |
-| `/api/admin/track/stop` | POST | Stop tracking loop (admin only) |
-| `/api/admin/poll/status` | GET | Discovery/tracking state, WC filter, fixture count, saved polls (admin only) |
+| `/api/admin/track/start` | POST | Arm tracking — fetches updates for tracked fixtures (admin only) |
+| `/api/admin/track/stop` | POST | Disarm tracking (admin only) |
+| `/api/admin/track/fixture` | POST | Toggle tracking for one fixture `{fid, tracked}` (admin only) |
+| `/api/admin/track/all` | POST | Toggle tracking for all fixtures `{tracked}` (admin only) |
+| `/api/admin/poll/status` | GET | Discovery/tracking state, per-fixture info, saved polls (admin only) |
 | `/api/admin/poll/wc-filter` | POST | Toggle World Cup–only fixture filter (admin only) |
 | `/api/admin/poll/discover` | POST | Re-run fixture discovery (admin only) |
 | `/api/admin/polls` | GET | List saved poll filenames (admin only) |
