@@ -350,9 +350,10 @@ def start_tracking():
     if TRACK_ACTIVE:
         return False
     TRACK_ACTIVE = True
-    log.info("TRACK toggled ON")
-    has_tracked = any(info["tracked"] for info in KNOWN_FIXTURES.values())
-    if has_tracked:
+    for info in KNOWN_FIXTURES.values():
+        info["tracked"] = True
+    log.info("TRACK toggled ON (%d fixtures set to tracked)", len(KNOWN_FIXTURES))
+    if KNOWN_FIXTURES:
         _start_track_thread()
     else:
         log.info("TRACK armed — will start when fixtures are discovered")
