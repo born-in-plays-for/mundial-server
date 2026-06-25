@@ -27,6 +27,9 @@ if [ -z "$API_FOOTBALL_KEY" ]; then
     exit 1
 fi
 
+# Kill any process already on the backend port
+lsof -ti :$NGROK_PORT | xargs kill -9 2>/dev/null || true
+
 # Start backend in background
 echo "Starting backend on port $NGROK_PORT..."
 python3 "$SERVER_DIR/backend.py" &
