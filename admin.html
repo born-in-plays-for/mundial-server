@@ -43,13 +43,20 @@ body { background: #f5f2ec; }
     <!-- Admin section -->
     <div id="admin-section" class="d-none">
       <div class="card mb-3">
-        <div class="card-body d-flex align-items-center gap-3">
-          <span class="fw-bold">Live polling</span>
-          <span id="poll-status" class="badge bg-secondary">unknown</span>
-          <span id="poll-fixtures" class="text-muted small"></span>
-          <button id="wc-filter" class="btn btn-sm btn-outline-warning ms-auto" onclick="toggleWcFilter()">WC only</button>
-          <button class="btn btn-sm btn-outline-info" onclick="discoverFixtures()">Discover</button>
-          <button id="poll-toggle" class="btn btn-sm btn-outline-success" onclick="togglePoll()">Start</button>
+        <div class="card-body d-flex flex-column gap-2">
+          <div class="d-flex align-items-center gap-3">
+            <span class="fw-bold">Discover</span>
+            <span id="discover-status" class="badge bg-secondary">off</span>
+            <span id="poll-fixtures" class="text-muted small"></span>
+            <button id="wc-filter" class="btn btn-sm btn-outline-warning ms-auto" onclick="toggleWcFilter()">WC only</button>
+            <button class="btn btn-sm btn-outline-info" onclick="discoverFixtures()">Once</button>
+            <button id="discover-toggle" class="btn btn-sm btn-outline-success" onclick="toggleDiscover()">Start</button>
+          </div>
+          <div class="d-flex align-items-center gap-3">
+            <span class="fw-bold">Track</span>
+            <span id="track-status" class="badge bg-secondary">off</span>
+            <button id="track-toggle" class="btn btn-sm btn-outline-success ms-auto" onclick="toggleTrack()">Start</button>
+          </div>
         </div>
       </div>
 
@@ -260,8 +267,8 @@ function connectWebSocket() {
     badge.className = 'badge bg-danger ms-auto';
   });
 
-  socket.on('poll_status', ({active, fixtures}) => {
-    updatePollUI(active, fixtures);
+  socket.on('poll_status', (data) => {
+    updatePollUI(data);
   });
 
   socket.on('user_login', user => {
@@ -309,47 +316,55 @@ async function loadPollStatus() {
     const r = await fetch(`${BACKEND}/api/admin/poll/status`, {credentials: 'include'});
     if (!r.ok) return;
     const data = await r.json();
-    updatePollUI(data.active, data.fixtures, data.wc_only);
+    updatePollUI(data);
   } catch {}
 }
 
-function updatePollUI(active, fixtures, wcOnly) {
-  const badge = document.getElementById('poll-status');
-  const btn = document.getElementById('poll-toggle');
-  const fixturesEl = document.getElementById('poll-fixtures');
-  const wcBtn = document.getElementById('wc-filter');
-  const hasFixtures = fixtures && fixtures.length > 0;
+function updateToggle(badgeId, btnId, active) {
+  const badge = document.getElementById(badgeId);
+  const btn = document.getElementById(btnId);
   if (active) {
-    badge.textContent = 'running';
+    badge.textContent = 'on';
     badge.className = 'badge bg-success';
     btn.textContent = 'Stop';
-    btn.className = 'btn btn-sm btn-outline-danger';
-    btn.disabled = false;
+    btn.className = 'btn btn-sm btn-outline-danger ms-auto';
   } else {
-    badge.textContent = 'stopped';
+    badge.textContent = 'off';
     badge.className = 'badge bg-secondary';
     btn.textContent = 'Start';
-    btn.className = 'btn btn-sm btn-outline-success';
-    btn.disabled = !hasFixtures;
+    btn.className = 'btn btn-sm btn-outline-success ms-auto';
   }
-  if (hasFixtures) {
+}
+
+function updatePollUI({discovering, tracking, fixtures, wc_only}) {
+  updateToggle('discover-status', 'discover-toggle', discovering);
+  updateToggle('track-status', 'track-toggle', tracking);
+  const fixturesEl = document.getElementById('poll-fixtures');
+  if (fixtures && fixtures.length > 0) {
     fixturesEl.textContent = 'fixtures: ' + fixtures.join(', ');
     fixturesEl.className = 'text-muted small';
   } else {
     fixturesEl.textContent = '';
   }
-  if (wcOnly !== undefined) {
-    wcBtn.textContent = wcOnly ? 'WC only' : 'All leagues';
-    wcBtn.className = wcOnly
+  if (wc_only !== undefined) {
+    const wcBtn = document.getElementById('wc-filter');
+    wcBtn.textContent = wc_only ? 'WC only' : 'All leagues';
+    wcBtn.className = wc_only
       ? 'btn btn-sm btn-outline-warning ms-auto'
       : 'btn btn-sm btn-warning ms-auto';
   }
 }
 
-async function togglePoll() {
-  const badge = document.getElementById('poll-status');
-  const isRunning = badge.textContent === 'running';
-  const endpoint = isRunning ? '/api/admin/poll/stop' : '/api/admin/poll/start';
+async function toggleDiscover() {
+  const isOn = document.getElementById('discover-status').textContent === 'on';
+  const endpoint = isOn ? '/api/admin/poll/stop' : '/api/admin/poll/start';
+  await fetch(BACKEND + endpoint, {method: 'POST', credentials: 'include'});
+  loadPollStatus();
+}
+
+async function toggleTrack() {
+  const isOn = document.getElementById('track-status').textContent === 'on';
+  const endpoint = isOn ? '/api/admin/track/stop' : '/api/admin/track/start';
   await fetch(BACKEND + endpoint, {method: 'POST', credentials: 'include'});
   loadPollStatus();
 }
@@ -370,8 +385,7 @@ async function discoverFixtures() {
   const r = await fetch(BACKEND + '/api/admin/poll/discover', {method: 'POST', credentials: 'include'});
   const data = await r.json();
   const fixtures = data.fixtures ?? [];
-  const isRunning = document.getElementById('poll-status').textContent === 'running';
-  updatePollUI(isRunning, fixtures);
+  loadPollStatus();
   if (fixtures.length === 0) showToast('No live fixtures found');
 }
 
