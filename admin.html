@@ -44,23 +44,24 @@ body { background: #f5f2ec; }
     <div id="admin-section" class="d-none">
       <div class="card mb-3">
         <div class="card-body">
-          <div style="display:grid; grid-template-columns: auto 1fr auto; align-items:center; gap:8px 12px;">
+          <div style="display:grid; grid-template-columns: auto 1fr; align-items:center; gap:8px 12px;">
             <div class="d-flex align-items-center gap-2">
-              <span class="fw-bold">Discover</span>
               <span id="discover-status" class="badge bg-secondary">off</span>
+              <span class="fw-bold">Discover</span>
             </div>
-            <div class="d-flex gap-2">
+            <div class="d-flex gap-2 justify-content-end">
               <button id="wc-filter" class="btn btn-sm btn-outline-warning" onclick="toggleWcFilter()">WC only</button>
               <button class="btn btn-sm btn-outline-info" onclick="discoverFixtures()">Once</button>
+              <button id="discover-toggle" class="btn btn-sm btn-outline-success" onclick="toggleDiscover()">Start</button>
             </div>
-            <button id="discover-toggle" class="btn btn-sm btn-outline-success" onclick="toggleDiscover()">Start</button>
 
             <div class="d-flex align-items-center gap-2">
-              <span class="fw-bold">Track</span>
               <span id="track-status" class="badge bg-secondary">off</span>
+              <span class="fw-bold">Track</span>
             </div>
-            <div></div>
-            <button id="track-toggle" class="btn btn-sm btn-outline-success" onclick="toggleTrack()">Start</button>
+            <div class="d-flex gap-2 justify-content-end">
+              <button id="track-toggle" class="btn btn-sm btn-outline-success" onclick="toggleTrack()">Start</button>
+            </div>
           </div>
           <div id="fixture-list" class="mt-2"></div>
         </div>
@@ -372,11 +373,13 @@ function renderFixtures(fixtures) {
       const btnLabel = f.tracked ? 'Stop' : 'Start';
       return `
       <div class="d-flex align-items-center gap-2" style="font-size:13px">
-        <span>${f.label}</span>
         <span class="badge ${statusCls}">${f.status || '?'}</span>
         <span class="badge ${trackedCls}">${f.tracked ? 'on' : 'off'}</span>
+        <span>${f.label}</span>
       </div>
-      <button class="btn btn-sm ${btnCls} py-0 px-2" style="font-size:11px" onclick="trackFixture(${fid}, ${!f.tracked})">${btnLabel}</button>`;
+      <div class="text-end">
+        <button class="btn btn-sm ${btnCls} py-0 px-2" style="font-size:11px" onclick="trackFixture(${fid}, ${!f.tracked})">${btnLabel}</button>
+      </div>`;
     }).join('') + `</div>`;
 }
 
