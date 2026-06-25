@@ -122,6 +122,7 @@ _discover_thread = None
 _track_thread = None
 POLLS_DIR = SERVER_DIR / "polls"
 KNOWN_FIXTURES = {}  # {fid: {"tracked": bool, "label": str, "status": str}}
+FIXTURE_DATA = {}    # {fid: last known fixture dict from API}
 ACTIVE_STATUSES = {"1H", "2H", "ET", "P"}
 
 def _load_latest_poll():
@@ -233,9 +234,11 @@ def _discover_wc_fixtures():
         else:
             KNOWN_FIXTURES[fid]["label"] = _fixture_label(f)
             KNOWN_FIXTURES[fid]["status"] = f["fixture"]["status"]["short"]
+        FIXTURE_DATA[fid] = f
     for fid in list(KNOWN_FIXTURES):
         if fid not in new_ids:
             del KNOWN_FIXTURES[fid]
+            FIXTURE_DATA.pop(fid, None)
     label = "WC" if WC_ONLY else "all"
     ids = list(new_ids)
     log.info("DISCOVER (%s) → %d live fixtures, %d matched: %s", label, len(fixtures), len(ids), ids)
@@ -269,7 +272,6 @@ def _track_loop():
             continue
         try:
             ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-            wc = []
             events_by_fixture = {}
             statistics_by_fixture = {}
             api_calls = 0
@@ -282,7 +284,7 @@ def _track_loop():
                     fixture_data = None
                 if fixture_data and len(fixture_data) > 0:
                     f = fixture_data[0]
-                    wc.append(f)
+                    FIXTURE_DATA[fid] = f
                     status = f["fixture"]["status"]["short"]
                     if fid in KNOWN_FIXTURES:
                         KNOWN_FIXTURES[fid]["status"] = status
@@ -297,17 +299,19 @@ def _track_loop():
                             statistics_by_fixture[fid] = stats
                     else:
                         log.info("TRACK fixture %d — skipping events/stats (status: %s)", fid, status)
-            for f in wc:
-                fid = f["fixture"]["id"]
+            for fid, f in FIXTURE_DATA.items():
                 if fid in events_by_fixture:
                     f["events"] = events_by_fixture[fid]
                 if fid in statistics_by_fixture:
                     f["statistics"] = statistics_by_fixture[fid]
-            LATEST_FIXTURES = wc
-            _save_poll(ts, wc, events_by_fixture, statistics_by_fixture)
-            log.info("TRACK → %d fixtures, %d API calls, emitting live_update",
-                     len(wc), api_calls)
-            socketio.emit("live_update", wc)
+                f["_tracked"] = KNOWN_FIXTURES.get(fid, {}).get("tracked", False)
+            all_fixtures = list(FIXTURE_DATA.values())
+            LATEST_FIXTURES = all_fixtures
+            tracked_fixtures = [FIXTURE_DATA[fid] for fid in tracked_ids if fid in FIXTURE_DATA]
+            _save_poll(ts, tracked_fixtures, events_by_fixture, statistics_by_fixture)
+            log.info("TRACK → %d tracked (%d total), %d API calls, emitting live_update",
+                     len(tracked_ids), len(all_fixtures), api_calls)
+            socketio.emit("live_update", all_fixtures)
             _emit_status()
         except Exception as e:
             log.error("TRACK error: %s", e)
