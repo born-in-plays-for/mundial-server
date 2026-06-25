@@ -137,8 +137,10 @@ def _load_latest_poll():
     if not files:
         return []
     data = json.loads(files[-1].read_text())
-    log.info("Loaded latest poll from %s", files[-1].name)
-    return _wc_filter(data.get("fixtures", []))
+    fixtures = _wc_filter(data.get("fixtures", []))
+    live = [f for f in fixtures if f["fixture"]["status"]["short"] in ACTIVE_STATUSES]
+    log.info("Loaded latest poll from %s (%d live of %d)", files[-1].name, len(live), len(fixtures))
+    return live
 
 LATEST_FIXTURES = _load_latest_poll()
 
