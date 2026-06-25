@@ -85,7 +85,7 @@ Dashboard (usage stats, key): https://dashboard.api-football.com/
 
 | Route | Method | Description |
 |---|---|---|
-| `/api/poll/active` | GET | Check if polling is active + tracked fixture IDs |
+| `/api/poll/active` | GET | Discovery/tracking state + tracked fixture IDs |
 | `/api/live` | GET | Latest stored fixtures (no API call) |
 | `/api/lineups/<id>` | GET | Starting XI + substitutes for a fixture (fetched on demand) |
 | `/api/auth/google` | POST | Verify Google Sign-In token, create session |
@@ -97,9 +97,11 @@ Dashboard (usage stats, key): https://dashboard.api-football.com/
 | `/api/admin/online` | GET | List active sessions with device info (admin only) |
 | `/api/admin/kick` | POST | Force-logout a session by `{sid}` or all sessions by `{email}` (admin only) |
 | `/api/admin/delete` | POST | Delete a user from `users.json` and kick all their sessions (admin only) |
-| `/api/admin/poll/start` | POST | Start API-Football polling loop (admin only) |
-| `/api/admin/poll/stop` | POST | Stop polling loop (admin only) |
-| `/api/admin/poll/status` | GET | Polling state: active, WC filter, fixture count, saved polls (admin only) |
+| `/api/admin/poll/start` | POST | Start discovery loop — polls API-Football for live fixtures (admin only) |
+| `/api/admin/poll/stop` | POST | Stop discovery loop (admin only) |
+| `/api/admin/track/start` | POST | Start tracking loop — fetches updates for known fixtures (admin only) |
+| `/api/admin/track/stop` | POST | Stop tracking loop (admin only) |
+| `/api/admin/poll/status` | GET | Discovery/tracking state, WC filter, fixture count, saved polls (admin only) |
 | `/api/admin/poll/wc-filter` | POST | Toggle World Cup–only fixture filter (admin only) |
 | `/api/admin/poll/discover` | POST | Re-run fixture discovery (admin only) |
 | `/api/admin/polls` | GET | List saved poll filenames (admin only) |
@@ -109,8 +111,8 @@ Dashboard (usage stats, key): https://dashboard.api-football.com/
 
 | Event | Direction | Payload |
 |---|---|---|
-| `live_update` | server → client | `[fixtures]` — every 60s when polling is on |
-| `poll_status` | server → client | `{active, fixtures, wc_only}` — when admin toggles polling or discovery runs |
+| `live_update` | server → client | `[fixtures]` — every 60s when tracking is on |
+| `poll_status` | server → client | `{discovering, tracking, fixtures, wc_only}` — when admin toggles discovery/tracking |
 | `user_login` | server → client | `{email, name, picture, last_login, device, sid}` |
 | `user_logout` | server → client | `{email, name, picture, sid}` |
 | `user_kicked` | server → client | `{email, sid?}` — if `sid` is present, only that session is kicked |
@@ -165,16 +167,30 @@ Sessions use Flask's default signed-cookie mechanism. The signing key is stable 
 
 The map page hides the auth bar by default. On load, it pings the backend (3-second timeout). If the backend is unreachable, the auth bar stays hidden and the page works exactly as before — no broken UI.
 
-## API-Football polling
+## API-Football: discovery and tracking
 
-When an admin starts polling, the backend:
+The backend has two independent loops, each controlled separately by admin endpoints:
 
-1. **Discovery** — fetches all live fixtures, filters to World Cup only (toggleable via WC filter)
-2. **Poll loop** — every 60s, fetches fixture data, events, and statistics for each tracked fixture (3 API calls per fixture per tick)
-3. **Broadcast** — emits `live_update` to all connected clients via WebSocket
-4. **Save** — writes each poll to `polls/` as a timestamped JSON file (fixtures + events + statistics)
+### Discovery (`/api/admin/poll/start` · `/api/admin/poll/stop`)
 
-On startup, the latest saved poll is loaded so `/api/live` always has data even before polling starts.
+Every 120s, fetches all live fixtures from API-Football and filters to World Cup only (toggleable via WC filter). Populates `KNOWN_FIXTURE_IDS` and emits `poll_status` to all clients. Can also be triggered manually via `/api/admin/poll/discover`.
+
+### Tracking (`/api/admin/track/start` · `/api/admin/track/stop`)
+
+Every 60s, fetches fixture data, events, and statistics for each fixture in `KNOWN_FIXTURE_IDS` (3 API calls per fixture per tick). Broadcasts `live_update` via WebSocket and saves each poll to `polls/` as a timestamped JSON file.
+
+### State model
+
+| Live fixtures? | Discovering? | Tracking? | Description |
+|---|---|---|---|
+| No | No | No | Idle — "taub und stumm" |
+| No | Yes | No | Looking for fixtures, nothing found yet |
+| Yes | No | No | Matches happening but server unaware |
+| Yes | Yes | No | Finding fixtures, not yet fetching updates |
+| Yes | No | Yes | Tracking known fixtures, won't discover new ones |
+| Yes | Yes | Yes | Fully active |
+
+On startup, the latest saved poll is loaded so `/api/live` always has data even before tracking starts.
 
 ## Architecture
 

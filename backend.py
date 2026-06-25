@@ -1,8 +1,9 @@
 """
 backend.py — Flask backend for the Mundial app.
 
-- Polls API-Football every 60s when polling is enabled (admin toggle)
-- Also fetches events per live WC fixture each tick
+- Two independent loops controlled by admin:
+  - DISCOVER: polls API-Football for live fixtures (every 120s)
+  - TRACK: fetches updates for known fixtures (every 60s)
 - Pushes live fixtures (with events) to clients via WebSocket ('live_update')
 - Saves each poll to polls/ directory for later inspection
 - GET /api/live returns latest stored data (no API call)
@@ -20,8 +21,8 @@ Usage:
     python3 backend.py
 
 WebSocket events:
-    server → client: 'live_update'   [fixtures]       — every 60s when polling is on
-    server → client: 'poll_status'   {active: bool}   — when admin toggles polling
+    server → client: 'live_update'   [fixtures]       — every 60s when tracking is on
+    server → client: 'poll_status'   {discovering, tracking, fixtures, wc_only}
     server → client: 'user_login'    {user}
     server → client: 'user_logout'   {user}
     server → client: 'user_kicked'   {email, sid}
@@ -112,10 +113,13 @@ def _save_users(users):
 
 # ── API-Football ─────────────────────────────────────────────────────────────
 
-POLL_INTERVAL = 60  # seconds
-POLL_ACTIVE = False
+DISCOVER_INTERVAL = 120  # seconds
+TRACK_INTERVAL = 60     # seconds
+DISCOVER_ACTIVE = False
+TRACK_ACTIVE = False
 WC_ONLY = True
-_poll_thread = None
+_discover_thread = None
+_track_thread = None
 POLLS_DIR = SERVER_DIR / "polls"
 KNOWN_FIXTURE_IDS = []
 
@@ -193,6 +197,14 @@ def _fetch_fixture_detail(fid, path):
         log.error("POLL %s error fixture %d: %s", path, fid, e)
         return None
 
+def _emit_status():
+    socketio.emit("poll_status", {
+        "discovering": DISCOVER_ACTIVE,
+        "tracking": TRACK_ACTIVE,
+        "fixtures": KNOWN_FIXTURE_IDS,
+        "wc_only": WC_ONLY,
+    })
+
 def _discover_wc_fixtures():
     global KNOWN_FIXTURE_IDS
     fixtures = api_get("/fixtures", {"live": "all"})
@@ -203,23 +215,29 @@ def _discover_wc_fixtures():
     ids = [f["fixture"]["id"] for f in matched]
     KNOWN_FIXTURE_IDS = ids
     label = "WC" if WC_ONLY else "all"
-    log.info("DISCOVERY (%s) → %d live fixtures, %d matched: %s", label, len(fixtures), len(ids), ids)
-    socketio.emit("poll_status", {"active": POLL_ACTIVE, "fixtures": KNOWN_FIXTURE_IDS, "wc_only": WC_ONLY})
+    log.info("DISCOVER (%s) → %d live fixtures, %d matched: %s", label, len(fixtures), len(ids), ids)
+    _emit_status()
     return ids
 
-def _poll_loop():
-    global LATEST_FIXTURES, POLL_ACTIVE
-    log.info("POLL started (every %ds)", POLL_INTERVAL)
-    try:
-        _discover_wc_fixtures()
-    except Exception as e:
-        log.error("POLL discovery error: %s", e)
-    if not KNOWN_FIXTURE_IDS:
-        log.warning("POLL no WC fixtures found, stopping")
-        POLL_ACTIVE = False
-        socketio.emit("poll_status", {"active": False, "fixtures": []})
-        return
-    while POLL_ACTIVE:
+def _discover_loop():
+    global DISCOVER_ACTIVE
+    log.info("DISCOVER loop started (every %ds)", DISCOVER_INTERVAL)
+    while DISCOVER_ACTIVE:
+        try:
+            _discover_wc_fixtures()
+        except Exception as e:
+            log.error("DISCOVER error: %s", e)
+        socketio.sleep(DISCOVER_INTERVAL)
+    log.info("DISCOVER loop stopped")
+
+def _track_loop():
+    global LATEST_FIXTURES, TRACK_ACTIVE
+    log.info("TRACK loop started (every %ds)", TRACK_INTERVAL)
+    while TRACK_ACTIVE:
+        if not KNOWN_FIXTURE_IDS:
+            log.debug("TRACK tick — no fixtures to track")
+            socketio.sleep(TRACK_INTERVAL)
+            continue
         try:
             ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             wc = []
@@ -229,7 +247,7 @@ def _poll_loop():
                 try:
                     fixture_data = api_get("/fixtures", {"id": fid})
                 except Exception as e:
-                    log.error("POLL /fixtures error fixture %d: %s", fid, e)
+                    log.error("TRACK /fixtures error fixture %d: %s", fid, e)
                     fixture_data = None
                 if fixture_data and len(fixture_data) > 0:
                     wc.append(fixture_data[0])
@@ -247,30 +265,50 @@ def _poll_loop():
                     f["statistics"] = statistics_by_fixture[fid]
             LATEST_FIXTURES = wc
             _save_poll(ts, wc, events_by_fixture, statistics_by_fixture)
-            log.info("POLL → %d WC fixtures, %d API calls, emitting live_update",
+            log.info("TRACK → %d fixtures, %d API calls, emitting live_update",
                      len(wc), len(KNOWN_FIXTURE_IDS) * 3)
             socketio.emit("live_update", wc)
         except Exception as e:
-            log.error("POLL error: %s", e)
-        socketio.sleep(POLL_INTERVAL)
-    log.info("POLL stopped")
+            log.error("TRACK error: %s", e)
+        socketio.sleep(TRACK_INTERVAL)
+    log.info("TRACK loop stopped")
 
-def start_polling():
-    global POLL_ACTIVE, _poll_thread
-    if POLL_ACTIVE:
+def start_discovering():
+    global DISCOVER_ACTIVE, _discover_thread
+    if DISCOVER_ACTIVE:
         return False
-    POLL_ACTIVE = True
-    _poll_thread = socketio.start_background_task(_poll_loop)
-    log.info("POLL toggled ON")
+    DISCOVER_ACTIVE = True
+    _discover_thread = socketio.start_background_task(_discover_loop)
+    log.info("DISCOVER toggled ON")
+    _emit_status()
     return True
 
-def stop_polling():
-    global POLL_ACTIVE
-    if not POLL_ACTIVE:
+def stop_discovering():
+    global DISCOVER_ACTIVE
+    if not DISCOVER_ACTIVE:
         return False
-    POLL_ACTIVE = False
-    log.info("POLL toggled OFF")
-    socketio.emit("poll_status", {"active": False, "fixtures": []})
+    DISCOVER_ACTIVE = False
+    log.info("DISCOVER toggled OFF")
+    _emit_status()
+    return True
+
+def start_tracking():
+    global TRACK_ACTIVE, _track_thread
+    if TRACK_ACTIVE:
+        return False
+    TRACK_ACTIVE = True
+    _track_thread = socketio.start_background_task(_track_loop)
+    log.info("TRACK toggled ON")
+    _emit_status()
+    return True
+
+def stop_tracking():
+    global TRACK_ACTIVE
+    if not TRACK_ACTIVE:
+        return False
+    TRACK_ACTIVE = False
+    log.info("TRACK toggled OFF")
+    _emit_status()
     return True
 
 @app.before_request
@@ -295,7 +333,7 @@ def cors(response):
 
 @app.route("/api/poll/active")
 def poll_active():
-    return jsonify({"active": POLL_ACTIVE, "fixtures": KNOWN_FIXTURE_IDS})
+    return jsonify({"discovering": DISCOVER_ACTIVE, "tracking": TRACK_ACTIVE, "fixtures": KNOWN_FIXTURE_IDS})
 
 @app.route("/api/live")
 def live():
@@ -325,7 +363,7 @@ def admin_poll_start():
     user = session.get("user")
     if not user or user["email"] not in ADMIN_EMAILS:
         return jsonify({"error": "forbidden"}), 403
-    started = start_polling()
+    started = start_discovering()
     return jsonify({"ok": True, "started": started, "already_running": not started})
 
 @app.route("/api/admin/poll/stop", methods=["POST"])
@@ -333,7 +371,23 @@ def admin_poll_stop():
     user = session.get("user")
     if not user or user["email"] not in ADMIN_EMAILS:
         return jsonify({"error": "forbidden"}), 403
-    stopped = stop_polling()
+    stopped = stop_discovering()
+    return jsonify({"ok": True, "stopped": stopped, "was_running": stopped})
+
+@app.route("/api/admin/track/start", methods=["POST"])
+def admin_track_start():
+    user = session.get("user")
+    if not user or user["email"] not in ADMIN_EMAILS:
+        return jsonify({"error": "forbidden"}), 403
+    started = start_tracking()
+    return jsonify({"ok": True, "started": started, "already_running": not started})
+
+@app.route("/api/admin/track/stop", methods=["POST"])
+def admin_track_stop():
+    user = session.get("user")
+    if not user or user["email"] not in ADMIN_EMAILS:
+        return jsonify({"error": "forbidden"}), 403
+    stopped = stop_tracking()
     return jsonify({"ok": True, "stopped": stopped, "was_running": stopped})
 
 @app.route("/api/admin/poll/status")
@@ -343,7 +397,8 @@ def admin_poll_status():
         return jsonify({"error": "forbidden"}), 403
     poll_count = len(list(POLLS_DIR.glob("*.json"))) if POLLS_DIR.exists() else 0
     return jsonify({
-        "active": POLL_ACTIVE,
+        "discovering": DISCOVER_ACTIVE,
+        "tracking": TRACK_ACTIVE,
         "wc_only": WC_ONLY,
         "fixtures": KNOWN_FIXTURE_IDS,
         "fixtures_count": len(LATEST_FIXTURES),
