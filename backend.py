@@ -204,6 +204,12 @@ def _fetch_fixture_detail(fid, path):
         log.error("POLL %s error fixture %d: %s", path, fid, e)
         return None
 
+def _emit_live_update():
+    for f in LATEST_FIXTURES:
+        fid = f["fixture"]["id"]
+        f["_tracked"] = KNOWN_FIXTURES.get(fid, {}).get("tracked", False)
+    socketio.emit("live_update", LATEST_FIXTURES)
+
 def _emit_status():
     socketio.emit("poll_status", {
         "discovering": DISCOVER_ACTIVE,
@@ -474,6 +480,7 @@ def admin_track_fixture():
     if TRACK_ACTIVE and tracked and _track_thread is None:
         _start_track_thread()
     _emit_status()
+    _emit_live_update()
     return jsonify({"ok": True})
 
 @app.route("/api/admin/track/all", methods=["POST"])
@@ -488,6 +495,7 @@ def admin_track_all():
     if TRACK_ACTIVE and tracked and KNOWN_FIXTURES and _track_thread is None:
         _start_track_thread()
     _emit_status()
+    _emit_live_update()
     return jsonify({"ok": True})
 
 @app.route("/api/admin/poll/status")
