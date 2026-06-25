@@ -125,6 +125,11 @@ KNOWN_FIXTURES = {}  # {fid: {"tracked": bool, "label": str, "status": str}}
 FIXTURE_DATA = {}    # {fid: last known fixture dict from API}
 ACTIVE_STATUSES = {"1H", "2H", "ET", "P"}
 
+def _wc_filter(fixtures):
+    if not WC_ONLY:
+        return fixtures
+    return [f for f in fixtures if f.get("league", {}).get("name") == "World Cup"]
+
 def _load_latest_poll():
     if not POLLS_DIR.exists():
         return []
@@ -133,7 +138,7 @@ def _load_latest_poll():
         return []
     data = json.loads(files[-1].read_text())
     log.info("Loaded latest poll from %s", files[-1].name)
-    return data.get("fixtures", [])
+    return _wc_filter(data.get("fixtures", []))
 
 LATEST_FIXTURES = _load_latest_poll()
 
@@ -305,7 +310,7 @@ def _track_loop():
                 if fid in statistics_by_fixture:
                     f["statistics"] = statistics_by_fixture[fid]
                 f["_tracked"] = KNOWN_FIXTURES.get(fid, {}).get("tracked", False)
-            all_fixtures = list(FIXTURE_DATA.values())
+            all_fixtures = _wc_filter(list(FIXTURE_DATA.values()))
             LATEST_FIXTURES = all_fixtures
             tracked_fixtures = [FIXTURE_DATA[fid] for fid in tracked_ids if fid in FIXTURE_DATA]
             _save_poll(ts, tracked_fixtures, events_by_fixture, statistics_by_fixture)

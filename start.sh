@@ -12,7 +12,6 @@ set -e
 SERVER_DIR="$(cd "$(dirname "$0")" && pwd)"
 MUNDIAL_REPO="${MUNDIAL_REPO:-$(cd "$SERVER_DIR/../mundial" && pwd)}"
 NGROK_PORT=5002
-NGROK_INSPECTOR_PORT=4041
 CONFIG_FILE="backend_config.json"
 
 # Load API key from .env
@@ -34,26 +33,38 @@ python3 "$SERVER_DIR/backend.py" &
 BACKEND_PID=$!
 sleep 2
 
-# Start ngrok in background
+# Start ngrok, capturing JSON logs to a temp file so we can extract the URL
+NGROK_LOG="/tmp/ngrok-log-$$.txt"
 echo "Starting ngrok tunnel..."
-ngrok http $NGROK_PORT --log=stdout > /dev/null &
+ngrok http $NGROK_PORT --log=stdout --log-format=json --log-level=info > "$NGROK_LOG" 2>&1 &
 NGROK_PID=$!
-sleep 3
 
-# Get the public URL from ngrok's local API
-NGROK_URL=$(curl -s http://localhost:$NGROK_INSPECTOR_PORT/api/tunnels 2>/dev/null | python3 -c "
+# Wait for the public URL to appear in the log (up to 15s)
+NGROK_URL=""
+for i in $(seq 1 15); do
+    sleep 1
+    NGROK_URL=$(python3 -c "
 import json, sys
 try:
-    data = json.load(sys.stdin)
-    for t in data.get('tunnels', []):
-        if t.get('proto') == 'https':
-            print(t['public_url'])
-            break
+    with open('$NGROK_LOG') as f:
+        for line in f:
+            try:
+                d = json.loads(line)
+                url = d.get('url', '')
+                if url.startswith('https://'):
+                    print(url)
+                    sys.exit(0)
+            except: pass
 except: pass
-")
+" 2>/dev/null)
+    if [ -n "$NGROK_URL" ]; then
+        break
+    fi
+done
 
 if [ -z "$NGROK_URL" ]; then
-    echo "ERROR: Could not get ngrok URL. Is port $NGROK_INSPECTOR_PORT available for ngrok inspector?"
+    echo "ERROR: Could not get ngrok URL. ngrok log:"
+    cat "$NGROK_LOG" 2>/dev/null || true
     kill $BACKEND_PID $NGROK_PID 2>/dev/null
     exit 1
 fi
@@ -85,5 +96,5 @@ echo ""
 echo "Press Ctrl+C to stop everything."
 
 # Wait and cleanup on exit
-trap "kill $BACKEND_PID $NGROK_PID 2>/dev/null; echo 'Stopped.'" EXIT
+trap "kill $BACKEND_PID $NGROK_PID 2>/dev/null; rm -f '$NGROK_LOG'; echo 'Stopped.'" EXIT
 wait
