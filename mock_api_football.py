@@ -57,8 +57,78 @@ MOCK_FIXTURES = [
             "halftime": {"home": 1, "away": 0},
             "fulltime": {"home": None, "away": None}
         }
+    },
+    {
+        "fixture": {
+            "id": 1489395,
+            "referee": "Clément Turpin, France",
+            "timezone": "UTC",
+            "date": "2026-06-20T18:00:00+00:00",
+            "timestamp": 1781978400,
+            "venue": {"id": 9012, "name": "Hard Rock Stadium", "city": "Miami"},
+            "status": {"long": "Half Time", "short": "HT", "elapsed": 45}
+        },
+        "league": {"id": 1, "name": "World Cup", "country": "World", "season": 2026, "round": "Group G - 2"},
+        "teams": {
+            "home": {"id": 26, "name": "Brazil", "logo": "https://media.api-sports.io/football/teams/26.png"},
+            "away": {"id": 1, "name": "Argentina", "logo": "https://media.api-sports.io/football/teams/1.png"}
+        },
+        "goals": {"home": 1, "away": 1},
+        "score": {
+            "halftime": {"home": 1, "away": 1},
+            "fulltime": {"home": None, "away": None}
+        }
     }
 ]
+
+MOCK_EVENTS = {
+    1489393: [
+        {"time": {"elapsed": 23, "extra": None}, "team": {"id": 108, "name": "Ivory Coast"}, "player": {"id": 50011, "name": "Ange-Yoan Bonny"}, "assist": {"id": 50007, "name": "Amad Diallo"}, "type": "Goal", "detail": "Normal Goal", "comments": None},
+    ],
+    1489394: [
+        {"time": {"elapsed": 12, "extra": None}, "team": {"id": 2, "name": "France"}, "player": {"id": 2010, "name": "Kylian Mbappé"}, "assist": {"id": 2009, "name": "Ousmane Dembélé"}, "type": "Goal", "detail": "Normal Goal", "comments": None},
+        {"time": {"elapsed": 38, "extra": None}, "team": {"id": 1530, "name": "Colombia"}, "player": {"id": 3010, "name": "Luis Díaz"}, "assist": {"id": 3009, "name": "James Rodríguez"}, "type": "Goal", "detail": "Normal Goal", "comments": None},
+        {"time": {"elapsed": 55, "extra": None}, "team": {"id": 2, "name": "France"}, "player": {"id": 2011, "name": "Bradley Barcola"}, "assist": {"id": 2010, "name": "Kylian Mbappé"}, "type": "Goal", "detail": "Normal Goal", "comments": None},
+        {"time": {"elapsed": 61, "extra": None}, "team": {"id": 1530, "name": "Colombia"}, "player": {"id": 3002, "name": "Daniel Muñoz"}, "assist": None, "type": "Card", "detail": "Yellow Card", "comments": "Foul"},
+    ],
+    1489395: [
+        {"time": {"elapsed": 30, "extra": None}, "team": {"id": 26, "name": "Brazil"}, "player": {"id": 4001, "name": "Vinícius Jr."}, "assist": {"id": 4002, "name": "Rodrygo"}, "type": "Goal", "detail": "Normal Goal", "comments": None},
+        {"time": {"elapsed": 44, "extra": 1}, "team": {"id": 1, "name": "Argentina"}, "player": {"id": 5001, "name": "Lionel Messi"}, "assist": None, "type": "Goal", "detail": "Penalty", "comments": None},
+    ],
+}
+
+MOCK_STATISTICS = {
+    1489393: [
+        {"team": {"id": 25, "name": "Germany"}, "statistics": [
+            {"type": "Ball Possession", "value": "62%"}, {"type": "Total Shots", "value": 8}, {"type": "Shots on Goal", "value": 3},
+            {"type": "Corner Kicks", "value": 4}, {"type": "Fouls", "value": 7}, {"type": "Yellow Cards", "value": 1},
+        ]},
+        {"team": {"id": 108, "name": "Ivory Coast"}, "statistics": [
+            {"type": "Ball Possession", "value": "38%"}, {"type": "Total Shots", "value": 5}, {"type": "Shots on Goal", "value": 2},
+            {"type": "Corner Kicks", "value": 1}, {"type": "Fouls", "value": 9}, {"type": "Yellow Cards", "value": 2},
+        ]},
+    ],
+    1489394: [
+        {"team": {"id": 2, "name": "France"}, "statistics": [
+            {"type": "Ball Possession", "value": "55%"}, {"type": "Total Shots", "value": 14}, {"type": "Shots on Goal", "value": 6},
+            {"type": "Corner Kicks", "value": 5}, {"type": "Fouls", "value": 10}, {"type": "Yellow Cards", "value": 0},
+        ]},
+        {"team": {"id": 1530, "name": "Colombia"}, "statistics": [
+            {"type": "Ball Possession", "value": "45%"}, {"type": "Total Shots", "value": 9}, {"type": "Shots on Goal", "value": 4},
+            {"type": "Corner Kicks", "value": 3}, {"type": "Fouls", "value": 12}, {"type": "Yellow Cards", "value": 1},
+        ]},
+    ],
+    1489395: [
+        {"team": {"id": 26, "name": "Brazil"}, "statistics": [
+            {"type": "Ball Possession", "value": "52%"}, {"type": "Total Shots", "value": 7}, {"type": "Shots on Goal", "value": 3},
+            {"type": "Corner Kicks", "value": 3}, {"type": "Fouls", "value": 8}, {"type": "Yellow Cards", "value": 1},
+        ]},
+        {"team": {"id": 1, "name": "Argentina"}, "statistics": [
+            {"type": "Ball Possession", "value": "48%"}, {"type": "Total Shots", "value": 6}, {"type": "Shots on Goal", "value": 2},
+            {"type": "Corner Kicks", "value": 2}, {"type": "Fouls", "value": 11}, {"type": "Yellow Cards", "value": 2},
+        ]},
+    ],
+}
 
 MOCK_LINEUPS = {
     1489393: [
@@ -249,7 +319,24 @@ MOCK_STANDINGS = [
 
 @app.route("/fixtures")
 def fixtures():
+    from flask import request
+    fid = request.args.get("id", type=int)
+    if fid:
+        match = [f for f in MOCK_FIXTURES if f["fixture"]["id"] == fid]
+        return jsonify({"response": match})
     return jsonify({"response": MOCK_FIXTURES})
+
+@app.route("/fixtures/events")
+def events():
+    from flask import request
+    fid = request.args.get("fixture", type=int)
+    return jsonify({"response": MOCK_EVENTS.get(fid, [])})
+
+@app.route("/fixtures/statistics")
+def statistics():
+    from flask import request
+    fid = request.args.get("fixture", type=int)
+    return jsonify({"response": MOCK_STATISTICS.get(fid, [])})
 
 @app.route("/fixtures/lineups")
 def lineups():
@@ -262,5 +349,5 @@ def standings():
     return jsonify({"response": MOCK_STANDINGS})
 
 if __name__ == "__main__":
-    print("Mock API-Football server on port 5003 — 2 fake WC matches (GER-CIV, FRA-COL)")
+    print("Mock API-Football server on port 5003 — 3 fake WC matches (GER-CIV 1H, FRA-COL 2H, BRA-ARG HT)")
     app.run(port=5003)
