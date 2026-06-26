@@ -407,7 +407,7 @@ async function toggleTrack() {
   const endpoint = isOn ? '/api/admin/track/stop' : '/api/admin/track/start';
   const r = await fetch(BACKEND + endpoint, {method: 'POST', credentials: 'include'});
   const data = await r.json();
-  if (data.ok) updateToggle('track', data.tracking);
+  if (data.ok) updateToggle('track-status', 'track-toggle', data.tracking);
 }
 
 async function toggleWcFilter() {
