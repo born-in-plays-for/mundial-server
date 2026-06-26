@@ -68,7 +68,9 @@ done
 if [ -z "$NGROK_URL" ]; then
     echo "ERROR: Could not get ngrok URL. ngrok log:"
     cat "$NGROK_LOG" 2>/dev/null || true
-    kill $BACKEND_PID $NGROK_PID 2>/dev/null
+    kill $NGROK_PID 2>/dev/null
+    echo ""
+    echo "Backend is still running on http://localhost:$NGROK_PORT — kill it manually or run again."
     exit 1
 fi
 
@@ -91,8 +93,9 @@ else
 fi
 
 echo ""
-echo "Login:  $NGROK_URL/login"
-echo "Admin:  $NGROK_URL/admin"
+echo "Login:       $NGROK_URL/login"
+echo "Admin:       $NGROK_URL/admin"
+echo "Admin auth:  $NGROK_URL/admin-auth"
 echo ""
 echo "Remember to add $NGROK_URL to Google OAuth authorized JavaScript origins"
 echo ""
