@@ -20,9 +20,11 @@ pip install flask flask-socketio requests
 
 | File | Purpose |
 |---|---|
-| `backend.py` | Flask backend — API proxy, auth, WebSocket, serves login/admin pages |
+| `backend.py` | Flask backend — API-Football proxy, WebSocket, serves admin pages |
+| `auth.py` | Reusable Google Sign-In + session management module — see [AUTH.md](AUTH.md) |
 | `mock_api_football.py` | Mock API-Football server for development (no API calls) |
-| `admin.html` | Admin page — discover/auto-track controls, per-fixture tracking toggles, per-device session table with live login/logout/kick feed |
+| `admin.html` | Admin page — discover/auto-track controls, per-fixture tracking toggles (`/admin`) |
+| `admin_auth.html` | Auth admin page — registered users, active sessions, kick/delete (`/admin-auth`) — see [AUTH.md](AUTH.md) |
 | `login.html` | Standalone Google Sign-In page (also used as popup from the map page) |
 | `start.sh` | One-command startup: kills any stale process on port 5002, starts backend + ngrok, extracts the public URL from ngrok's JSON log, auto-publishes URL to GitHub Pages |
 | `users.json` | Persisted user history (gitignored) |
@@ -69,8 +71,9 @@ Dashboard (usage stats, key): https://dashboard.api-football.com/
 
 | URL | What |
 |---|---|
-| `http://localhost:5002/login` | Login page (served by backend) |
-| `http://localhost:5002/admin` | Admin dashboard (served by backend) |
+| `http://localhost:5002/login` | Login page |
+| `http://localhost:5002/admin` | Admin — fixtures / discover / track |
+| `http://localhost:5002/admin-auth` | Admin — users / sessions / kick |
 | `http://localhost:4040/wc2026_live_game.html` | Live game page (nginx) |
 
 ### Production (ngrok running)
@@ -79,35 +82,35 @@ Dashboard (usage stats, key): https://dashboard.api-football.com/
 |---|---|
 | `https://mundial.cthiebaud.com/wc2026_live_game.html` | Live game page — reads ngrok URL from `backend_config.json` |
 | `https://xxx.ngrok-free.dev/login` | Login page |
-| `https://xxx.ngrok-free.dev/admin` | Admin dashboard |
+| `https://xxx.ngrok-free.dev/admin` | Admin — fixtures / discover / track |
+| `https://xxx.ngrok-free.dev/admin-auth` | Admin — users / sessions / kick |
 
 ## Endpoints
+
+| Route | Method | Description |
+|---|---|---|
+**Auth endpoints** (`/login`, `/api/auth/*`, `/api/admin/users|online|kick|delete`) are registered by `auth.py` — see [AUTH.md](AUTH.md).
 
 | Route | Method | Description |
 |---|---|---|
 | `/api/poll/active` | GET | Discovery state + tracked fixture IDs |
 | `/api/live` | GET | Latest stored fixtures (no API call) |
 | `/api/lineups/<id>` | GET | Starting XI + substitutes for a fixture (fetched on demand) |
-| `/api/auth/google` | POST | Verify Google Sign-In token, create session |
-| `/api/auth/me` | GET | Current user from session |
-| `/api/auth/logout` | POST | Clear session (accepts `{sid, email}` in body) |
-| `/login` | GET | User login page |
-| `/admin` | GET | Admin page (requires admin email) |
-| `/api/admin/users` | GET | List all known users (admin only) |
-| `/api/admin/online` | GET | List active sessions with device info (admin only) |
-| `/api/admin/kick` | POST | Force-logout a session by `{sid}` or all sessions by `{email}` (admin only) |
-| `/api/admin/delete` | POST | Delete a user from `users.json` and kick all their sessions (admin only) |
-| `/api/admin/poll/start` | POST | Start discovery loop — polls API-Football for live fixtures (admin only) |
+| `/api/standings` | GET | Group standings (cached 5 min) |
+| `/api/group-results` | GET | Finished group stage fixtures (cached 5 min) |
+| `/admin` | GET | Fixtures admin page (discover / track) |
+| `/admin-auth` | GET | Auth admin page (users / sessions / kick) — see [AUTH.md](AUTH.md) |
+| `/api/admin/poll/start` | POST | Start discovery loop (admin only) |
 | `/api/admin/poll/stop` | POST | Stop discovery loop (admin only) |
-| `/api/admin/track/start` | POST | Arm auto-track — fetches updates for tracked fixtures; returns `{"ok": true, "tracking": bool}` (admin only) |
-| `/api/admin/track/stop` | POST | Disarm auto-track; returns `{"ok": true, "tracking": bool}` (admin only) |
-| `/api/admin/track/fixture` | POST | Toggle tracking for one fixture `{fid, tracked}` (admin only) |
-| `/api/admin/track/all` | POST | Toggle tracking for all fixtures `{tracked}` (admin only) |
-| `/api/admin/poll/status` | GET | Discovery/tracking state, per-fixture info, saved polls (admin only) |
+| `/api/admin/poll/discover` | POST | Re-run fixture discovery immediately (admin only) |
+| `/api/admin/poll/status` | GET | Discovery/tracking state, per-fixture info, saved poll count (admin only) |
 | `/api/admin/poll/wc-filter` | POST | Toggle World Cup–only fixture filter (admin only) |
-| `/api/admin/poll/discover` | POST | Re-run fixture discovery (admin only) |
 | `/api/admin/polls` | GET | List saved poll filenames (admin only) |
 | `/api/admin/polls/<name>` | GET | Get a specific saved poll by name (admin only) |
+| `/api/admin/track/start` | POST | Arm auto-track (admin only) |
+| `/api/admin/track/stop` | POST | Disarm auto-track (admin only) |
+| `/api/admin/track/fixture` | POST | Toggle tracking for one fixture `{fid, tracked}` (admin only) |
+| `/api/admin/track/all` | POST | Toggle tracking for all fixtures `{tracked}` (admin only) |
 
 ### WebSocket events
 
@@ -122,52 +125,7 @@ Dashboard (usage stats, key): https://dashboard.api-football.com/
 
 ## Authentication
 
-### Google Sign-In (popup flow)
-
-The main map page uses a **popup** to sign in — the Google button is rendered on the backend origin (port 5002 or ngrok), avoiding origin mismatch issues.
-
-1. User clicks "sign in" on the map page
-2. A popup opens to `BACKEND/login`
-3. User signs in with Google in the popup
-4. Popup sends `postMessage({type: 'mundial_auth', user, admin, sid})` to the parent
-5. Popup closes; parent stores user + session ID in `localStorage`
-6. Admin page receives a `user_login` WebSocket event in real time
-
-**Client ID:** `657438044008-qddq7m5mgk59k8qnhjpd6dalndqqb50e.apps.googleusercontent.com`
-
-### Google Cloud Console setup
-
-[Google Cloud Console → Credentials](https://console.cloud.google.com/apis/credentials) — Authorized JavaScript origins:
-
-| Origin | Purpose |
-|---|---|
-| `http://localhost:5002` | Local dev (backend-served login/admin pages) |
-| `https://mundial.cthiebaud.com` | Production (GitHub Pages) — not strictly needed since popup runs on backend origin |
-| `https://xxx.ngrok-free.dev` | ngrok tunnel (usually stable, update if it changes) |
-
-Note: `http://localhost:4040` is **not** needed — the map page uses the popup flow, so Google only sees the backend origin.
-
-### Admin access
-
-Controlled by `ADMIN_EMAILS` in `backend.py`. Currently: `christophe.t60@gmail.com`.
-
-### Per-device session tracking
-
-Each login creates a unique session ID and records the browser/OS from the `User-Agent` header. The admin page shows one row per active session (e.g. "Chrome / macOS", "Safari / macOS") with individual kick buttons.
-
-Kicking a session by `sid` only logs out that specific browser. Kicking by `email` logs out all sessions for that user.
-
-### Cross-origin auth (localStorage)
-
-The map page and backend run on different origins. Since cross-origin cookies don't travel, the frontend stores `{user, admin, sid}` in `localStorage` after sign-in. The session ID is also stored separately as `mundial_sid` for logout/kick matching.
-
-### Session persistence
-
-Sessions use Flask's default signed-cookie mechanism. The signing key is stable across restarts: if `FLASK_SECRET` is set, it's used; otherwise a random key is generated once and saved to `.flask_secret`. This means authenticated users stay logged in after a server reboot — no Redis or database needed.
-
-### Auth bar auto-hide
-
-The map page hides the auth bar by default. On load, it pings the backend (3-second timeout). If the backend is unreachable, the auth bar stays hidden and the page works exactly as before — no broken UI.
+Handled by `auth.py` — see **[AUTH.md](AUTH.md)** for the full reference: sign-in flow, endpoints, WebSocket events, session persistence, Google Cloud Console setup, and cross-origin auth.
 
 ## API-Football: discovery and auto-tracking
 
@@ -205,7 +163,7 @@ On startup, the latest saved poll is loaded so `/api/live` always has data even 
 graph TD
     A[Browser<br>mundial.cthiebaud.com] -->|localhost?| B1[http://localhost:5002]
     A -->|production?| F[backend_config.json] -->|ngrok URL| B2[https://xxx.ngrok-free.dev]
-    B1 & B2 --> B[backend.py]
+    B1 & B2 --> B[backend.py + auth.py]
     B -->|Dev| C[mock_api_football.py<br>localhost:5003]
     B -->|Prod| D[v3.football.api-sports.io]
     E[Internet] -->|ngrok tunnel| B

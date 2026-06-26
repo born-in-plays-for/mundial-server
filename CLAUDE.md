@@ -49,13 +49,17 @@ The frontend badge reflects these three states. Do not collapse them into a simp
 
 ### `_tracked` flag on fixtures
 
-Each fixture in `live_update` carries `_tracked: bool`. This lets the frontend dim untracked fixtures without knowing anything about global auto-track state. The flag is set server-side in the poll loop based on `KNOWN_FIXTURES[fid]['tracked']`.
+Each fixture in `live_update` carries `_tracked: bool`. This lets the frontend dim untracked fixtures without knowing anything about global auto-track state. The flag is set server-side in the poll loop based on `tracker.known_fixtures[fid]['tracked']`.
 
 ### Per-fixture tracking vs. global auto-track
 
 Two orthogonal concepts:
 - **Global auto-track** (`/api/admin/track/start|stop`): arms/disarms the 60s loop that fetches data for tracked fixtures. Internal only.
 - **Per-fixture `tracked` flag** (`/api/admin/track/fixture`): marks which fixtures the loop should fetch. Visible to clients via `_tracked` in `live_update`.
+
+### Auto-track defaults to on at startup
+
+`FixtureTracker` initialises with `track_active = True`. No fixtures exist yet so no thread is spawned — it is just armed. When discovery finds fixtures, they are immediately set to `tracked=True` and the track thread starts. Do not change this default; it is intentional so the admin does not need to manually arm tracking after each restart.
 
 ### Startup poll loading
 
@@ -67,11 +71,20 @@ Always use `{transports: ['websocket']}` on the client side (already done in `au
 
 ---
 
-## Admin panel (`admin.html`)
+## Admin pages
 
-Plain HTML + vanilla JS + Bootstrap 5. No build step, no framework. Served directly by Flask at `/admin`.
+Plain HTML + vanilla JS + Bootstrap 5. No build step, no framework. Two pages, each focused on one concern:
 
-**Layout conventions (as of 2026-06-26):**
+| File | Route | Concern |
+|---|---|---|
+| `admin.html` | `/admin` | Discover / auto-track / per-fixture tracking |
+| `admin_auth.html` | `/admin-auth` | Registered users / active sessions / kick / delete |
+
+Each page has its own WebSocket connection and only handles the events it needs. They link to each other via a nav link in the header.
+
+`admin_auth.html` is reusable — it belongs logically to `auth.py` and can be copied to other projects alongside it.
+
+**Layout conventions for `admin.html` (as of 2026-06-26):**
 - Status badge (on/off) appears **before** the label: `[on] Discover`, `[on] Track`
 - Action buttons are **right-aligned** in a flex container: `[WC only] [Once] [Stop]`
 - Per-fixture rows: status badge → tracked badge → team label, with Stop button right-aligned (not full-width)

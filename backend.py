@@ -8,7 +8,7 @@ backend.py — Flask backend for the Mundial app.
 - Saves each poll to polls/ directory for later inspection
 - GET /api/live returns latest stored data (no API call)
 - GET /api/lineups/<id> fetches directly (lineups don't change mid-match)
-- Google Sign-In authentication
+- Google Sign-In authentication (via auth.py)
 - Admin page with live WebSocket updates on login/logout
 
 Usage:
@@ -22,16 +22,18 @@ Usage:
 
 WebSocket events:
     server → client: 'live_update'   [fixtures]       — every 60s when tracking is on
-    server → client: 'poll_status'   {discovering, tracking, fixtures, wc_only}
+    server → client: 'poll_status'   {discovering, fixtures, wc_only}
     server → client: 'user_login'    {user}
     server → client: 'user_logout'   {user}
     server → client: 'user_kicked'   {email, sid}
 """
 
-import os, time, sys, json, uuid, re, logging
+import os, time, sys, json, logging
+import requests as req
 from pathlib import Path
 from flask import Flask, jsonify, request, session, send_file
 from flask_socketio import SocketIO
+from auth import AuthManager
 
 log = logging.getLogger("mundial")
 log.setLevel(logging.DEBUG)
@@ -52,8 +54,6 @@ API_BASE = os.environ.get("API_FOOTBALL_URL", "https://v3.football.api-sports.io
 GOOGLE_CLIENT_ID = "657438044008-qddq7m5mgk59k8qnhjpd6dalndqqb50e.apps.googleusercontent.com"
 ADMIN_EMAILS = {"christophe.t60@gmail.com"}
 
-import requests as req
-
 app = Flask(__name__)
 
 def _stable_secret_key():
@@ -72,316 +72,277 @@ app.secret_key = _stable_secret_key()
 socketio = SocketIO(app, cors_allowed_origins="*")
 
 SERVER_DIR = Path(__file__).parent
-USERS_FILE = SERVER_DIR / "users.json"
-ONLINE_SESSIONS = {}  # session_id → {email, user, device, time}
-
-def _parse_device(ua):
-    ua = ua or ""
-    browser = "Unknown"
-    ver = ""
-    m = None
-    if "Edg/" in ua:
-        browser = "Edge"
-        m = re.search(r"Edg/(\d+)", ua)
-    elif "Chrome/" in ua:
-        browser = "Chrome"
-        m = re.search(r"Chrome/(\d+)", ua)
-    elif "Safari/" in ua and "Chrome" not in ua:
-        browser = "Safari"
-        m = re.search(r"Version/(\d+)", ua)
-    elif "Firefox/" in ua:
-        browser = "Firefox"
-        m = re.search(r"Firefox/(\d+)", ua)
-    if m:
-        ver = " " + m.group(1)
-    os_name = "Unknown"
-    if "Macintosh" in ua: os_name = "macOS"
-    elif "Windows" in ua: os_name = "Windows"
-    elif "iPhone" in ua: os_name = "iPhone"
-    elif "iPad" in ua: os_name = "iPad"
-    elif "Android" in ua: os_name = "Android"
-    elif "Linux" in ua: os_name = "Linux"
-    return f"{browser}{ver} / {os_name}"
-
-def _load_users():
-    if USERS_FILE.exists():
-        return json.loads(USERS_FILE.read_text())
-    return {}
-
-def _save_users(users):
-    USERS_FILE.write_text(json.dumps(users, indent=2, ensure_ascii=False))
+auth = AuthManager(socketio, SERVER_DIR / "users.json", GOOGLE_CLIENT_ID, ADMIN_EMAILS)
+app.register_blueprint(auth.blueprint)
 
 # ── API-Football ─────────────────────────────────────────────────────────────
 
-DISCOVER_INTERVAL = 120  # seconds
-TRACK_INTERVAL = 60     # seconds
-DISCOVER_ACTIVE = False
-TRACK_ACTIVE = False
-WC_ONLY = True
-_discover_thread = None
-_track_thread = None
-POLLS_DIR = SERVER_DIR / "polls"
-KNOWN_FIXTURES = {}  # {fid: {"tracked": bool, "label": str, "status": str}}
-FIXTURE_DATA = {}    # {fid: last known fixture dict from API}
-ACTIVE_STATUSES = {"1H", "2H", "ET", "P"}
+class FixtureTracker:
+    ACTIVE_STATUSES = {"1H", "2H", "ET", "P"}
+    _CACHE_TTL = 300  # 5 minutes
 
-def _wc_filter(fixtures):
-    if not WC_ONLY:
-        return fixtures
-    return [f for f in fixtures if f.get("league", {}).get("name") == "World Cup"]
+    def __init__(self, socketio, server_dir):
+        self.socketio = socketio
+        self.polls_dir = server_dir / "polls"
+        self.discover_interval = 120
+        self.track_interval = 60
+        self.discover_active = False
+        self.track_active = True
+        self.wc_only = True
+        self._discover_thread = None
+        self._track_thread = None
+        self.known_fixtures = {}  # {fid: {"tracked": bool, "label": str, "status": str}}
+        self.fixture_data = {}    # {fid: last known fixture dict from API}
+        self._standings_cache = {"data": None, "ts": 0}
+        self._results_cache = {"data": None, "ts": 0}
+        self.latest_fixtures = self._load_latest_poll()
 
-def _load_latest_poll():
-    if not POLLS_DIR.exists():
-        return []
-    files = sorted(POLLS_DIR.glob("*.json"))
-    if not files:
-        return []
-    data = json.loads(files[-1].read_text())
-    fixtures = _wc_filter(data.get("fixtures", []))
-    live = [f for f in fixtures if f["fixture"]["status"]["short"] in ACTIVE_STATUSES]
-    log.info("Loaded latest poll from %s (%d live of %d)", files[-1].name, len(live), len(fixtures))
-    return live
+    # ── API ───────────────────────────────────────────────────────────────────
 
-LATEST_FIXTURES = _load_latest_poll()
+    def api_get(self, path, params):
+        url = f"{API_BASE}{path}"
+        log.info("API REQUEST %s %s", path, params)
+        r = req.get(url, headers={"x-apisports-key": API_KEY}, params=params, timeout=10)
+        r.raise_for_status()
+        return r.json().get("response", [])
 
-import time as _time
-_STANDINGS_CACHE = {"data": None, "ts": 0}
-_STANDINGS_TTL = 300  # 5 minutes
+    def fetch_standings(self):
+        now = time.time()
+        if self._standings_cache["data"] and now - self._standings_cache["ts"] < self._CACHE_TTL:
+            return self._standings_cache["data"]
+        try:
+            raw = self.api_get("/standings", {"league": 1, "season": 2026})
+            groups = raw[0]["league"]["standings"] if raw else []
+            self._standings_cache["data"] = groups
+            self._standings_cache["ts"] = now
+            log.info("Fetched standings: %d groups", len(groups))
+        except Exception as e:
+            log.warning("Failed to fetch standings: %s", e)
+        return self._standings_cache["data"] or []
 
-def _fetch_standings():
-    now = _time.time()
-    if _STANDINGS_CACHE["data"] and now - _STANDINGS_CACHE["ts"] < _STANDINGS_TTL:
-        return _STANDINGS_CACHE["data"]
-    try:
-        raw = api_get("/standings", {"league": 1, "season": 2026})
-        groups = raw[0]["league"]["standings"] if raw else []
-        _STANDINGS_CACHE["data"] = groups
-        _STANDINGS_CACHE["ts"] = now
-        log.info("Fetched standings: %d groups", len(groups))
-    except Exception as e:
-        log.warning("Failed to fetch standings: %s", e)
-    return _STANDINGS_CACHE["data"] or []
+    def fetch_group_results(self):
+        now = time.time()
+        if self._results_cache["data"] and now - self._results_cache["ts"] < self._CACHE_TTL:
+            return self._results_cache["data"]
+        try:
+            fixtures = []
+            for rd in range(1, 4):
+                fixtures += self.api_get("/fixtures", {"league": 1, "season": 2026, "round": f"Group Stage - {rd}"})
+            finished = [f for f in fixtures if f["fixture"]["status"]["short"] == "FT"]
+            self._results_cache["data"] = finished
+            self._results_cache["ts"] = now
+            log.info("Fetched group results: %d finished fixtures", len(finished))
+        except Exception as e:
+            log.warning("Failed to fetch group results: %s", e)
+        return self._results_cache["data"] or []
 
-_RESULTS_CACHE = {"data": None, "ts": 0}
+    def _fetch_fixture_detail(self, fid, path):
+        try:
+            return self.api_get(path, {"fixture": fid})
+        except Exception as e:
+            log.error("POLL %s error fixture %d: %s", path, fid, e)
+            return None
 
-def _fetch_group_results():
-    now = _time.time()
-    if _RESULTS_CACHE["data"] and now - _RESULTS_CACHE["ts"] < _STANDINGS_TTL:
-        return _RESULTS_CACHE["data"]
-    try:
-        fixtures = []
-        for rd in range(1, 4):
-            fixtures += api_get("/fixtures", {"league": 1, "season": 2026, "round": f"Group Stage - {rd}"})
-        finished = [f for f in fixtures if f["fixture"]["status"]["short"] == "FT"]
-        _RESULTS_CACHE["data"] = finished
-        _RESULTS_CACHE["ts"] = now
-        log.info("Fetched group results: %d finished fixtures", len(finished))
-    except Exception as e:
-        log.warning("Failed to fetch group results: %s", e)
-    return _RESULTS_CACHE["data"] or []
+    # ── Persistence ───────────────────────────────────────────────────────────
 
-def api_get(path, params):
-    url = f"{API_BASE}{path}"
-    log.info("API REQUEST %s %s", path, params)
-    r = req.get(url, headers={"x-apisports-key": API_KEY}, params=params, timeout=10)
-    r.raise_for_status()
-    return r.json().get("response", [])
+    def _wc_filter(self, fixtures):
+        if not self.wc_only:
+            return fixtures
+        return [f for f in fixtures if f.get("league", {}).get("name") == "World Cup"]
 
-def _save_poll(timestamp, fixtures, events_by_fixture, statistics_by_fixture):
-    POLLS_DIR.mkdir(exist_ok=True)
-    record = {
-        "timestamp": timestamp,
-        "fixtures": fixtures,
-        "events": {str(k): v for k, v in events_by_fixture.items()},
-        "statistics": {str(k): v for k, v in statistics_by_fixture.items()},
-    }
-    filename = POLLS_DIR / f"{timestamp.replace(':', '-')}.json"
-    filename.write_text(json.dumps(record, indent=2, ensure_ascii=False))
-    log.debug("POLL saved to %s", filename.name)
+    def _load_latest_poll(self):
+        if not self.polls_dir.exists():
+            return []
+        files = sorted(self.polls_dir.glob("*.json"))
+        if not files:
+            return []
+        data = json.loads(files[-1].read_text())
+        fixtures = self._wc_filter(data.get("fixtures", []))
+        live = [f for f in fixtures if f["fixture"]["status"]["short"] in self.ACTIVE_STATUSES]
+        log.info("Loaded latest poll from %s (%d live of %d)", files[-1].name, len(live), len(fixtures))
+        return live
 
-def _fetch_fixture_detail(fid, path):
-    try:
-        return api_get(path, {"fixture": fid})
-    except Exception as e:
-        log.error("POLL %s error fixture %d: %s", path, fid, e)
-        return None
+    def _save_poll(self, timestamp, fixtures, events_by_fixture, statistics_by_fixture):
+        self.polls_dir.mkdir(exist_ok=True)
+        record = {
+            "timestamp": timestamp,
+            "fixtures": fixtures,
+            "events": {str(k): v for k, v in events_by_fixture.items()},
+            "statistics": {str(k): v for k, v in statistics_by_fixture.items()},
+        }
+        filename = self.polls_dir / f"{timestamp.replace(':', '-')}.json"
+        filename.write_text(json.dumps(record, indent=2, ensure_ascii=False))
+        log.debug("POLL saved to %s", filename.name)
 
-def _emit_live_update():
-    for f in LATEST_FIXTURES:
-        fid = f["fixture"]["id"]
-        f["_tracked"] = KNOWN_FIXTURES.get(fid, {}).get("tracked", False)
-    socketio.emit("live_update", LATEST_FIXTURES)
+    # ── Emit ──────────────────────────────────────────────────────────────────
 
-def _emit_status():
-    socketio.emit("poll_status", {
-        "discovering": DISCOVER_ACTIVE,
-        "fixtures": {
-            str(fid): info for fid, info in KNOWN_FIXTURES.items()
-        },
-        "wc_only": WC_ONLY,
-    })
+    def emit_live_update(self):
+        for f in self.latest_fixtures:
+            fid = f["fixture"]["id"]
+            f["_tracked"] = self.known_fixtures.get(fid, {}).get("tracked", False)
+        self.socketio.emit("live_update", self.latest_fixtures)
 
-def _fixture_label(f):
-    home = f.get("teams", {}).get("home", {}).get("name", "?")
-    away = f.get("teams", {}).get("away", {}).get("name", "?")
-    return f"{home} vs {away}"
+    def emit_status(self):
+        self.socketio.emit("poll_status", {
+            "discovering": self.discover_active,
+            "fixtures": {str(fid): info for fid, info in self.known_fixtures.items()},
+            "wc_only": self.wc_only,
+        })
 
-def _discover_wc_fixtures():
-    global KNOWN_FIXTURES
-    had_tracked = any(info["tracked"] for info in KNOWN_FIXTURES.values())
-    fixtures = api_get("/fixtures", {"live": "all"})
-    if WC_ONLY:
-        matched = [f for f in fixtures if f["league"]["name"] == "World Cup"]
-    else:
-        matched = fixtures[:2]
-    new_ids = {f["fixture"]["id"] for f in matched}
-    for f in matched:
-        fid = f["fixture"]["id"]
-        if fid not in KNOWN_FIXTURES:
-            KNOWN_FIXTURES[fid] = {
-                "tracked": TRACK_ACTIVE,
-                "label": _fixture_label(f),
-                "status": f["fixture"]["status"]["short"],
-            }
+    # ── Discover loop ─────────────────────────────────────────────────────────
+
+    def _fixture_label(self, f):
+        home = f.get("teams", {}).get("home", {}).get("name", "?")
+        away = f.get("teams", {}).get("away", {}).get("name", "?")
+        return f"{home} vs {away}"
+
+    def _discover_wc_fixtures(self):
+        had_tracked = any(info["tracked"] for info in self.known_fixtures.values())
+        fixtures = self.api_get("/fixtures", {"live": "all"})
+        matched = [f for f in fixtures if f["league"]["name"] == "World Cup"] if self.wc_only else fixtures[:2]
+        new_ids = {f["fixture"]["id"] for f in matched}
+        for f in matched:
+            fid = f["fixture"]["id"]
+            if fid not in self.known_fixtures:
+                self.known_fixtures[fid] = {
+                    "tracked": self.track_active,
+                    "label": self._fixture_label(f),
+                    "status": f["fixture"]["status"]["short"],
+                }
+            else:
+                self.known_fixtures[fid]["label"] = self._fixture_label(f)
+                self.known_fixtures[fid]["status"] = f["fixture"]["status"]["short"]
+            self.fixture_data[fid] = f
+        if fixtures:  # skip pruning on empty API response (transient error guard)
+            for fid in list(self.known_fixtures):
+                if fid not in new_ids:
+                    del self.known_fixtures[fid]
+                    self.fixture_data.pop(fid, None)
+        label = "WC" if self.wc_only else "all"
+        ids = list(new_ids)
+        log.info("DISCOVER (%s) → %d live fixtures, %d matched: %s", label, len(fixtures), len(ids), ids)
+        has_tracked = any(info["tracked"] for info in self.known_fixtures.values())
+        if has_tracked and not had_tracked and self.track_active and self._track_thread is None:
+            self._start_track_thread()
+        self.emit_status()
+        return ids
+
+    def _discover_loop(self):
+        log.info("DISCOVER loop started (every %ds)", self.discover_interval)
+        while self.discover_active:
+            try:
+                self._discover_wc_fixtures()
+            except Exception as e:
+                log.error("DISCOVER error: %s", e)
+            self.socketio.sleep(self.discover_interval)
+        log.info("DISCOVER loop stopped")
+
+    def start_discovering(self):
+        if self.discover_active:
+            return False
+        self.discover_active = True
+        self._discover_thread = self.socketio.start_background_task(self._discover_loop)
+        log.info("DISCOVER toggled ON")
+        self.emit_status()
+        return True
+
+    def stop_discovering(self):
+        if not self.discover_active:
+            return False
+        self.discover_active = False
+        log.info("DISCOVER toggled OFF")
+        self.emit_status()
+        return True
+
+    # ── Track loop ────────────────────────────────────────────────────────────
+
+    def _track_loop(self):
+        log.info("TRACK loop started (every %ds)", self.track_interval)
+        while self.track_active:
+            tracked_ids = [fid for fid, info in self.known_fixtures.items() if info["tracked"]]
+            if not tracked_ids:
+                log.debug("TRACK tick — no tracked fixtures")
+                self.socketio.sleep(self.track_interval)
+                continue
+            try:
+                ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                events_by_fixture = {}
+                statistics_by_fixture = {}
+                api_calls = 0
+                for fid in tracked_ids:
+                    try:
+                        fixture_data = self.api_get("/fixtures", {"id": fid})
+                        api_calls += 1
+                    except Exception as e:
+                        log.error("TRACK /fixtures error fixture %d: %s", fid, e)
+                        fixture_data = None
+                    if fixture_data:
+                        f = fixture_data[0]
+                        self.fixture_data[fid] = f
+                        status = f["fixture"]["status"]["short"]
+                        if fid in self.known_fixtures:
+                            self.known_fixtures[fid]["status"] = status
+                        if status in self.ACTIVE_STATUSES:
+                            events = self._fetch_fixture_detail(fid, "/fixtures/events")
+                            api_calls += 1
+                            if events is not None:
+                                events_by_fixture[fid] = events
+                            stats = self._fetch_fixture_detail(fid, "/fixtures/statistics")
+                            api_calls += 1
+                            if stats is not None:
+                                statistics_by_fixture[fid] = stats
+                        else:
+                            log.info("TRACK fixture %d — skipping events/stats (status: %s)", fid, status)
+                for fid, f in self.fixture_data.items():
+                    if fid in events_by_fixture:
+                        f["events"] = events_by_fixture[fid]
+                    if fid in statistics_by_fixture:
+                        f["statistics"] = statistics_by_fixture[fid]
+                    f["_tracked"] = self.known_fixtures.get(fid, {}).get("tracked", False)
+                all_fixtures = self._wc_filter(list(self.fixture_data.values()))
+                self.latest_fixtures = all_fixtures
+                tracked_fixtures = [self.fixture_data[fid] for fid in tracked_ids if fid in self.fixture_data]
+                self._save_poll(ts, tracked_fixtures, events_by_fixture, statistics_by_fixture)
+                log.info("TRACK → %d tracked (%d total), %d API calls, emitting live_update",
+                         len(tracked_ids), len(all_fixtures), api_calls)
+                self.socketio.emit("live_update", all_fixtures)
+                self.emit_status()
+            except Exception as e:
+                log.error("TRACK error: %s", e)
+            self.socketio.sleep(self.track_interval)
+        self._track_thread = None
+        log.info("TRACK loop stopped")
+
+    def _start_track_thread(self):
+        if self._track_thread is not None:
+            return
+        self._track_thread = self.socketio.start_background_task(self._track_loop)
+        log.info("TRACK thread spawned")
+
+    def set_automated_tracking(self):
+        if self.track_active:
+            return False
+        self.track_active = True
+        for info in self.known_fixtures.values():
+            info["tracked"] = True
+        log.info("TRACK toggled ON (%d fixtures set to tracked)", len(self.known_fixtures))
+        if self.known_fixtures:
+            self._start_track_thread()
         else:
-            KNOWN_FIXTURES[fid]["label"] = _fixture_label(f)
-            KNOWN_FIXTURES[fid]["status"] = f["fixture"]["status"]["short"]
-        FIXTURE_DATA[fid] = f
-    for fid in list(KNOWN_FIXTURES):
-        if fid not in new_ids:
-            del KNOWN_FIXTURES[fid]
-            FIXTURE_DATA.pop(fid, None)
-    label = "WC" if WC_ONLY else "all"
-    ids = list(new_ids)
-    log.info("DISCOVER (%s) → %d live fixtures, %d matched: %s", label, len(fixtures), len(ids), ids)
-    has_tracked = any(info["tracked"] for info in KNOWN_FIXTURES.values())
-    if has_tracked and not had_tracked and TRACK_ACTIVE and _track_thread is None:
-        _start_track_thread()
-    elif not has_tracked and had_tracked and _track_thread is not None:
-        _stop_track_thread()
-    _emit_status()
-    return ids
+            log.info("TRACK armed — will start when fixtures are discovered")
+        return True
 
-def _discover_loop():
-    global DISCOVER_ACTIVE
-    log.info("DISCOVER loop started (every %ds)", DISCOVER_INTERVAL)
-    while DISCOVER_ACTIVE:
-        try:
-            _discover_wc_fixtures()
-        except Exception as e:
-            log.error("DISCOVER error: %s", e)
-        socketio.sleep(DISCOVER_INTERVAL)
-    log.info("DISCOVER loop stopped")
+    def unset_automated_tracking(self):
+        if not self.track_active:
+            return False
+        self.track_active = False
+        log.info("TRACK toggled OFF")
+        return True
 
-def _track_loop():
-    global LATEST_FIXTURES, _track_thread
-    log.info("TRACK loop started (every %ds)", TRACK_INTERVAL)
-    while TRACK_ACTIVE:
-        tracked_ids = [fid for fid, info in KNOWN_FIXTURES.items() if info["tracked"]]
-        if not tracked_ids:
-            log.debug("TRACK tick — no tracked fixtures")
-            socketio.sleep(TRACK_INTERVAL)
-            continue
-        try:
-            ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-            events_by_fixture = {}
-            statistics_by_fixture = {}
-            api_calls = 0
-            for fid in tracked_ids:
-                try:
-                    fixture_data = api_get("/fixtures", {"id": fid})
-                    api_calls += 1
-                except Exception as e:
-                    log.error("TRACK /fixtures error fixture %d: %s", fid, e)
-                    fixture_data = None
-                if fixture_data and len(fixture_data) > 0:
-                    f = fixture_data[0]
-                    FIXTURE_DATA[fid] = f
-                    status = f["fixture"]["status"]["short"]
-                    if fid in KNOWN_FIXTURES:
-                        KNOWN_FIXTURES[fid]["status"] = status
-                    if status in ACTIVE_STATUSES:
-                        events = _fetch_fixture_detail(fid, "/fixtures/events")
-                        api_calls += 1
-                        if events is not None:
-                            events_by_fixture[fid] = events
-                        stats = _fetch_fixture_detail(fid, "/fixtures/statistics")
-                        api_calls += 1
-                        if stats is not None:
-                            statistics_by_fixture[fid] = stats
-                    else:
-                        log.info("TRACK fixture %d — skipping events/stats (status: %s)", fid, status)
-            for fid, f in FIXTURE_DATA.items():
-                if fid in events_by_fixture:
-                    f["events"] = events_by_fixture[fid]
-                if fid in statistics_by_fixture:
-                    f["statistics"] = statistics_by_fixture[fid]
-                f["_tracked"] = KNOWN_FIXTURES.get(fid, {}).get("tracked", False)
-            all_fixtures = _wc_filter(list(FIXTURE_DATA.values()))
-            LATEST_FIXTURES = all_fixtures
-            tracked_fixtures = [FIXTURE_DATA[fid] for fid in tracked_ids if fid in FIXTURE_DATA]
-            _save_poll(ts, tracked_fixtures, events_by_fixture, statistics_by_fixture)
-            log.info("TRACK → %d tracked (%d total), %d API calls, emitting live_update",
-                     len(tracked_ids), len(all_fixtures), api_calls)
-            socketio.emit("live_update", all_fixtures)
-            _emit_status()
-        except Exception as e:
-            log.error("TRACK error: %s", e)
-        socketio.sleep(TRACK_INTERVAL)
-    _track_thread = None
-    log.info("TRACK loop stopped")
 
-def _start_track_thread():
-    global _track_thread
-    if _track_thread is not None:
-        return
-    _track_thread = socketio.start_background_task(_track_loop)
-    log.info("TRACK thread spawned")
+tracker = FixtureTracker(socketio, SERVER_DIR)
 
-def _stop_track_thread():
-    global _track_thread
-    _track_thread = None
-
-def start_discovering():
-    global DISCOVER_ACTIVE, _discover_thread
-    if DISCOVER_ACTIVE:
-        return False
-    DISCOVER_ACTIVE = True
-    _discover_thread = socketio.start_background_task(_discover_loop)
-    log.info("DISCOVER toggled ON")
-    _emit_status()
-    return True
-
-def stop_discovering():
-    global DISCOVER_ACTIVE
-    if not DISCOVER_ACTIVE:
-        return False
-    DISCOVER_ACTIVE = False
-    log.info("DISCOVER toggled OFF")
-    _emit_status()
-    return True
-
-def set_automated_tracking():
-    global TRACK_ACTIVE
-    if TRACK_ACTIVE:
-        return False
-    TRACK_ACTIVE = True
-    for info in KNOWN_FIXTURES.values():
-        info["tracked"] = True
-    log.info("TRACK toggled ON (%d fixtures set to tracked)", len(KNOWN_FIXTURES))
-    if KNOWN_FIXTURES:
-        _start_track_thread()
-    else:
-        log.info("TRACK armed — will start when fixtures are discovered")
-    return True
-
-def unset_automated_tracking():
-    global TRACK_ACTIVE
-    if not TRACK_ACTIVE:
-        return False
-    TRACK_ACTIVE = False
-    log.info("TRACK toggled OFF")
-    return True
+# ── CORS ─────────────────────────────────────────────────────────────────────
 
 @app.before_request
 def handle_preflight():
@@ -403,300 +364,166 @@ def cors(response):
     response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
     return response
 
+# ── Public API ────────────────────────────────────────────────────────────────
+
 @app.route("/api/poll/active")
 def poll_active():
-    return jsonify({"discovering": DISCOVER_ACTIVE, "tracking": TRACK_ACTIVE, "fixtures": list(KNOWN_FIXTURES.keys())})
+    return jsonify({
+        "discovering": tracker.discover_active,
+        "tracking": tracker.track_active,
+        "fixtures": list(tracker.known_fixtures.keys()),
+    })
 
 @app.route("/api/live")
 def live():
-    log.info("GET /api/live → returning %d stored fixtures", len(LATEST_FIXTURES))
-    return jsonify(LATEST_FIXTURES)
+    log.info("GET /api/live → returning %d stored fixtures", len(tracker.latest_fixtures))
+    return jsonify(tracker.latest_fixtures)
 
 @app.route("/api/standings")
 def standings():
-    groups = _fetch_standings()
+    groups = tracker.fetch_standings()
     log.info("GET /api/standings → %d groups", len(groups))
     return jsonify(groups)
 
 @app.route("/api/group-results")
 def group_results():
-    results = _fetch_group_results()
+    results = tracker.fetch_group_results()
     log.info("GET /api/group-results → %d fixtures", len(results))
     return jsonify(results)
 
 @app.route("/api/lineups/<int:fixture_id>")
 def lineups(fixture_id):
-    data = api_get("/fixtures/lineups", {"fixture": fixture_id})
+    data = tracker.api_get("/fixtures/lineups", {"fixture": fixture_id})
     log.info("GET /api/lineups/%d → %d teams", fixture_id, len(data))
     return jsonify(data)
 
+# ── Admin API — discover ──────────────────────────────────────────────────────
+
 @app.route("/api/admin/poll/start", methods=["POST"])
 def admin_poll_start():
-    user = session.get("user")
-    if not user or user["email"] not in ADMIN_EMAILS:
-        return jsonify({"error": "forbidden"}), 403
-    started = start_discovering()
+    _, err = auth.require_admin()
+    if err: return err
+    started = tracker.start_discovering()
     return jsonify({"ok": True, "started": started, "already_running": not started})
 
 @app.route("/api/admin/poll/stop", methods=["POST"])
 def admin_poll_stop():
-    user = session.get("user")
-    if not user or user["email"] not in ADMIN_EMAILS:
-        return jsonify({"error": "forbidden"}), 403
-    stopped = stop_discovering()
+    _, err = auth.require_admin()
+    if err: return err
+    stopped = tracker.stop_discovering()
     return jsonify({"ok": True, "stopped": stopped, "was_running": stopped})
-
-@app.route("/api/admin/track/start", methods=["POST"])
-def admin_track_start():
-    user = session.get("user")
-    if not user or user["email"] not in ADMIN_EMAILS:
-        return jsonify({"error": "forbidden"}), 403
-    set_automated_tracking()
-    return jsonify({"ok": True, "tracking": TRACK_ACTIVE})
-
-@app.route("/api/admin/track/stop", methods=["POST"])
-def admin_track_stop():
-    user = session.get("user")
-    if not user or user["email"] not in ADMIN_EMAILS:
-        return jsonify({"error": "forbidden"}), 403
-    unset_automated_tracking()
-    return jsonify({"ok": True, "tracking": TRACK_ACTIVE})
-
-@app.route("/api/admin/track/fixture", methods=["POST"])
-def admin_track_fixture():
-    user = session.get("user")
-    if not user or user["email"] not in ADMIN_EMAILS:
-        return jsonify({"error": "forbidden"}), 403
-    fid = request.json.get("fid")
-    tracked = request.json.get("tracked")
-    if fid is None or tracked is None:
-        return jsonify({"error": "missing fid or tracked"}), 400
-    fid = int(fid)
-    if fid not in KNOWN_FIXTURES:
-        return jsonify({"error": "unknown fixture"}), 404
-    KNOWN_FIXTURES[fid]["tracked"] = bool(tracked)
-    log.info("TRACK fixture %d → %s", fid, "on" if tracked else "off")
-    if TRACK_ACTIVE and tracked and _track_thread is None:
-        _start_track_thread()
-    _emit_status()
-    _emit_live_update()
-    return jsonify({"ok": True})
-
-@app.route("/api/admin/track/all", methods=["POST"])
-def admin_track_all():
-    user = session.get("user")
-    if not user or user["email"] not in ADMIN_EMAILS:
-        return jsonify({"error": "forbidden"}), 403
-    tracked = bool(request.json.get("tracked", True))
-    for info in KNOWN_FIXTURES.values():
-        info["tracked"] = tracked
-    log.info("TRACK all fixtures → %s", "on" if tracked else "off")
-    if TRACK_ACTIVE and tracked and KNOWN_FIXTURES and _track_thread is None:
-        _start_track_thread()
-    _emit_status()
-    _emit_live_update()
-    return jsonify({"ok": True})
-
-@app.route("/api/admin/poll/status")
-def admin_poll_status():
-    user = session.get("user")
-    if not user or user["email"] not in ADMIN_EMAILS:
-        return jsonify({"error": "forbidden"}), 403
-    poll_count = len(list(POLLS_DIR.glob("*.json"))) if POLLS_DIR.exists() else 0
-    return jsonify({
-        "discovering": DISCOVER_ACTIVE,
-        "tracking": TRACK_ACTIVE,
-        "wc_only": WC_ONLY,
-        "fixtures": {
-            str(fid): info for fid, info in KNOWN_FIXTURES.items()
-        },
-        "fixtures_count": len(LATEST_FIXTURES),
-        "saved_polls": poll_count,
-    })
-
-@app.route("/api/admin/poll/wc-filter", methods=["POST"])
-def admin_poll_wc_filter():
-    global WC_ONLY
-    user = session.get("user")
-    if not user or user["email"] not in ADMIN_EMAILS:
-        return jsonify({"error": "forbidden"}), 403
-    WC_ONLY = not WC_ONLY
-    log.info("WC filter toggled: %s", "ON" if WC_ONLY else "OFF")
-    return jsonify({"ok": True, "wc_only": WC_ONLY})
 
 @app.route("/api/admin/poll/discover", methods=["POST"])
 def admin_poll_discover():
-    user = session.get("user")
-    if not user or user["email"] not in ADMIN_EMAILS:
-        return jsonify({"error": "forbidden"}), 403
+    _, err = auth.require_admin()
+    if err: return err
     try:
-        ids = _discover_wc_fixtures()
+        ids = tracker._discover_wc_fixtures()
         return jsonify({"ok": True, "fixtures": ids})
     except Exception as e:
         log.error("DISCOVERY error: %s", e)
         return jsonify({"error": str(e)}), 500
 
+@app.route("/api/admin/poll/wc-filter", methods=["POST"])
+def admin_poll_wc_filter():
+    _, err = auth.require_admin()
+    if err: return err
+    tracker.wc_only = not tracker.wc_only
+    log.info("WC filter toggled: %s", "ON" if tracker.wc_only else "OFF")
+    return jsonify({"ok": True, "wc_only": tracker.wc_only})
+
+@app.route("/api/admin/poll/status")
+def admin_poll_status():
+    _, err = auth.require_admin()
+    if err: return err
+    poll_count = len(list(tracker.polls_dir.glob("*.json"))) if tracker.polls_dir.exists() else 0
+    return jsonify({
+        "discovering": tracker.discover_active,
+        "tracking": tracker.track_active,
+        "wc_only": tracker.wc_only,
+        "fixtures": {str(fid): info for fid, info in tracker.known_fixtures.items()},
+        "fixtures_count": len(tracker.latest_fixtures),
+        "saved_polls": poll_count,
+    })
+
 @app.route("/api/admin/polls")
 def admin_polls_list():
-    user = session.get("user")
-    if not user or user["email"] not in ADMIN_EMAILS:
-        return jsonify({"error": "forbidden"}), 403
-    if not POLLS_DIR.exists():
+    _, err = auth.require_admin()
+    if err: return err
+    if not tracker.polls_dir.exists():
         return jsonify([])
-    files = sorted(POLLS_DIR.glob("*.json"), reverse=True)
+    files = sorted(tracker.polls_dir.glob("*.json"), reverse=True)
     return jsonify([f.stem for f in files])
 
 @app.route("/api/admin/polls/<name>")
 def admin_polls_get(name):
-    user = session.get("user")
-    if not user or user["email"] not in ADMIN_EMAILS:
-        return jsonify({"error": "forbidden"}), 403
-    path = POLLS_DIR / f"{name}.json"
+    _, err = auth.require_admin()
+    if err: return err
+    path = tracker.polls_dir / f"{name}.json"
     if not path.exists():
         return jsonify({"error": "not found"}), 404
     return jsonify(json.loads(path.read_text()))
 
-# ── Auth ─────────────────────────────────────────────────────────────────────
+# ── Admin API — track ─────────────────────────────────────────────────────────
 
-@app.route("/api/auth/google", methods=["POST"])
-def auth_google():
-    token = request.json.get("credential")
-    if not token:
-        return jsonify({"error": "missing credential"}), 400
+@app.route("/api/admin/track/start", methods=["POST"])
+def admin_track_start():
+    _, err = auth.require_admin()
+    if err: return err
+    tracker.set_automated_tracking()
+    return jsonify({"ok": True, "tracking": tracker.track_active})
 
-    r = req.get("https://oauth2.googleapis.com/tokeninfo", params={"id_token": token}, timeout=5)
-    if r.status_code != 200:
-        return jsonify({"error": "invalid token"}), 401
+@app.route("/api/admin/track/stop", methods=["POST"])
+def admin_track_stop():
+    _, err = auth.require_admin()
+    if err: return err
+    tracker.unset_automated_tracking()
+    return jsonify({"ok": True, "tracking": tracker.track_active})
 
-    info = r.json()
-    if info.get("aud") != GOOGLE_CLIENT_ID:
-        return jsonify({"error": "wrong audience"}), 401
-
-    user = {
-        "email": info["email"],
-        "name": info.get("name", ""),
-        "picture": info.get("picture", ""),
-        "last_login": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-    }
-
-    users = _load_users()
-    users[user["email"]] = user
-    _save_users(users)
-
-    sid = str(uuid.uuid4())[:8]
-    session["user"] = user
-    session["sid"] = sid
-    device = _parse_device(request.headers.get("User-Agent"))
-    ONLINE_SESSIONS[sid] = {
-        "email": user["email"], "user": user, "device": device,
-        "time": user["last_login"], "sid": sid,
-    }
-    log.info("LOGIN  %s [%s] sid=%s", user["email"], device, sid)
-    socketio.emit("user_login", {**user, "device": device, "sid": sid})
-
-    return jsonify({"user": user, "admin": user["email"] in ADMIN_EMAILS, "sid": sid})
-
-@app.route("/api/auth/me")
-def auth_me():
-    user = session.get("user")
-    sid = session.get("sid")
-    if not user:
-        log.debug("GET /api/auth/me → no session")
-        return jsonify({"user": None}), 200
-    tracked = sid in ONLINE_SESSIONS if sid else False
-    log.debug("GET /api/auth/me → %s sid=%s tracked=%s", user["email"], sid, tracked)
-    return jsonify({"user": user, "admin": user["email"] in ADMIN_EMAILS, "sid": sid})
-
-@app.route("/api/auth/logout", methods=["POST"])
-def auth_logout():
-    user = session.pop("user", None)
-    data = request.json or {}
-    sid = data.get("sid")
-    email = data.get("email")
-    logged_out_sid = None
-    if sid and sid in ONLINE_SESSIONS:
-        entry = ONLINE_SESSIONS.pop(sid)
-        user = entry["user"]
-        logged_out_sid = sid
-    elif email:
-        for k, v in list(ONLINE_SESSIONS.items()):
-            if v["email"] == email:
-                ONLINE_SESSIONS.pop(k)
-                user = v["user"]
-                logged_out_sid = k
-                break
-    if user:
-        log.info("LOGOUT %s sid=%s (online: %d remaining)", user.get("email", "?"), logged_out_sid, len(ONLINE_SESSIONS))
-        socketio.emit("user_logout", {**user, "sid": logged_out_sid})
-    else:
-        log.warning("LOGOUT with no matching session (sid=%s email=%s)", sid, email)
+@app.route("/api/admin/track/fixture", methods=["POST"])
+def admin_track_fixture():
+    _, err = auth.require_admin()
+    if err: return err
+    fid = request.json.get("fid")
+    tracked = request.json.get("tracked")
+    if fid is None or tracked is None:
+        return jsonify({"error": "missing fid or tracked"}), 400
+    fid = int(fid)
+    if fid not in tracker.known_fixtures:
+        return jsonify({"error": "unknown fixture"}), 404
+    tracker.known_fixtures[fid]["tracked"] = bool(tracked)
+    log.info("TRACK fixture %d → %s", fid, "on" if tracked else "off")
+    if tracker.track_active and tracked and tracker._track_thread is None:
+        tracker._start_track_thread()
+    tracker.emit_status()
+    tracker.emit_live_update()
     return jsonify({"ok": True})
 
-# ── Pages ────────────────────────────────────────────────────────────────────
+@app.route("/api/admin/track/all", methods=["POST"])
+def admin_track_all():
+    _, err = auth.require_admin()
+    if err: return err
+    tracked = bool(request.json.get("tracked", True))
+    for info in tracker.known_fixtures.values():
+        info["tracked"] = tracked
+    log.info("TRACK all fixtures → %s", "on" if tracked else "off")
+    if tracker.track_active and tracked and tracker.known_fixtures and tracker._track_thread is None:
+        tracker._start_track_thread()
+    tracker.emit_status()
+    tracker.emit_live_update()
+    return jsonify({"ok": True})
 
-@app.route("/login")
-def login_page():
-    return send_file(SERVER_DIR / "login.html")
+# ── Pages ─────────────────────────────────────────────────────────────────────
 
 @app.route("/admin")
 def admin_page():
     return send_file(SERVER_DIR / "admin.html")
 
-@app.route("/api/admin/users")
-def admin_users():
-    user = session.get("user")
-    if not user or user["email"] not in ADMIN_EMAILS:
-        return jsonify({"error": "forbidden"}), 403
-    return jsonify(_load_users())
+@app.route("/admin-auth")
+def admin_auth_page():
+    return send_file(SERVER_DIR / "admin_auth.html")
 
-@app.route("/api/admin/online")
-def admin_online():
-    user = session.get("user")
-    if not user or user["email"] not in ADMIN_EMAILS:
-        return jsonify({"error": "forbidden"}), 403
-    return jsonify(list(ONLINE_SESSIONS.values()))
-
-@app.route("/api/admin/kick", methods=["POST"])
-def admin_kick():
-    user = session.get("user")
-    if not user or user["email"] not in ADMIN_EMAILS:
-        return jsonify({"error": "forbidden"}), 403
-    sid = request.json.get("sid")
-    email = request.json.get("email")
-    if sid and sid in ONLINE_SESSIONS:
-        entry = ONLINE_SESSIONS.pop(sid)
-        log.info("KICK   %s sid=%s (online: %d remaining)", entry["email"], sid, len(ONLINE_SESSIONS))
-        socketio.emit("user_kicked", {"email": entry["email"], "sid": sid})
-    elif email:
-        count = sum(1 for v in ONLINE_SESSIONS.values() if v["email"] == email)
-        for k, v in list(ONLINE_SESSIONS.items()):
-            if v["email"] == email:
-                ONLINE_SESSIONS.pop(k)
-        log.info("KICK   %s (all %d sessions, online: %d remaining)", email, count, len(ONLINE_SESSIONS))
-        socketio.emit("user_kicked", {"email": email})
-    else:
-        return jsonify({"error": "missing sid or email"}), 400
-    return jsonify({"ok": True})
-
-@app.route("/api/admin/delete", methods=["POST"])
-def admin_delete():
-    user = session.get("user")
-    if not user or user["email"] not in ADMIN_EMAILS:
-        return jsonify({"error": "forbidden"}), 403
-    email = request.json.get("email")
-    if not email:
-        return jsonify({"error": "missing email"}), 400
-    for k, v in list(ONLINE_SESSIONS.items()):
-        if v["email"] == email:
-            ONLINE_SESSIONS.pop(k)
-    socketio.emit("user_kicked", {"email": email})
-    users = _load_users()
-    if email in users:
-        del users[email]
-        _save_users(users)
-    log.info("DELETE %s (removed from users.json + all sessions)", email)
-    socketio.emit("user_deleted", {"email": email})
-    return jsonify({"ok": True})
+# ─────────────────────────────────────────────────────────────────────────────
 
 class _WsUpgradeFilter(logging.Filter):
     def filter(self, record):
