@@ -57,10 +57,10 @@ body { background: #f5f2ec; }
 
             <div class="d-flex align-items-center gap-2">
               <span id="track-status" class="badge bg-secondary">off</span>
-              <span class="fw-bold">Track</span>
+              <span class="fw-bold">Auto-Track</span>
             </div>
             <div class="d-flex gap-2 justify-content-end">
-              <button id="track-toggle" class="btn btn-sm btn-outline-success" onclick="toggleTrack()">Start</button>
+              <button id="track-toggle" class="btn btn-sm btn-outline-success" onclick="toggleTrack()">Set</button>
             </div>
           </div>
           <div id="fixture-list" class="mt-2"></div>
@@ -327,18 +327,18 @@ async function loadPollStatus() {
   } catch {}
 }
 
-function updateToggle(badgeId, btnId, active) {
+function updateToggle(badgeId, btnId, active, onLabel = 'Stop', offLabel = 'Start') {
   const badge = document.getElementById(badgeId);
   const btn = document.getElementById(btnId);
   if (active) {
     badge.textContent = 'on';
     badge.className = 'badge bg-success';
-    btn.textContent = 'Stop';
+    btn.textContent = onLabel;
     btn.className = 'btn btn-sm btn-outline-danger';
   } else {
     badge.textContent = 'off';
     badge.className = 'badge bg-secondary';
-    btn.textContent = 'Start';
+    btn.textContent = offLabel;
     btn.className = 'btn btn-sm btn-outline-success';
   }
 }
@@ -385,7 +385,7 @@ function renderFixtures(fixtures) {
 
 function updatePollUI({discovering, tracking, fixtures, wc_only}) {
   updateToggle('discover-status', 'discover-toggle', discovering);
-  updateToggle('track-status', 'track-toggle', tracking);
+  if (tracking !== undefined) updateToggle('track-status', 'track-toggle', tracking, 'Unset', 'Set');
   renderFixtures(fixtures);
   if (wc_only !== undefined) {
     const wcBtn = document.getElementById('wc-filter');
@@ -407,7 +407,7 @@ async function toggleTrack() {
   const endpoint = isOn ? '/api/admin/track/stop' : '/api/admin/track/start';
   const r = await fetch(BACKEND + endpoint, {method: 'POST', credentials: 'include'});
   const data = await r.json();
-  if (data.ok) updateToggle('track-status', 'track-toggle', data.tracking);
+  if (data.ok) updateToggle('track-status', 'track-toggle', data.tracking, 'Unset', 'Set');
 }
 
 async function toggleWcFilter() {

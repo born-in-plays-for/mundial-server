@@ -215,7 +215,6 @@ def _emit_live_update():
 def _emit_status():
     socketio.emit("poll_status", {
         "discovering": DISCOVER_ACTIVE,
-        "tracking": TRACK_ACTIVE,
         "fixtures": {
             str(fid): info for fid, info in KNOWN_FIXTURES.items()
         },
