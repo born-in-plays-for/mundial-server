@@ -362,7 +362,7 @@ def stop_discovering():
     _emit_status()
     return True
 
-def start_tracking():
+def set_automated_tracking():
     global TRACK_ACTIVE
     if TRACK_ACTIVE:
         return False
@@ -374,16 +374,14 @@ def start_tracking():
         _start_track_thread()
     else:
         log.info("TRACK armed — will start when fixtures are discovered")
-    _emit_status()
     return True
 
-def stop_tracking():
+def unset_automated_tracking():
     global TRACK_ACTIVE
     if not TRACK_ACTIVE:
         return False
     TRACK_ACTIVE = False
     log.info("TRACK toggled OFF")
-    _emit_status()
     return True
 
 @app.before_request
@@ -454,16 +452,16 @@ def admin_track_start():
     user = session.get("user")
     if not user or user["email"] not in ADMIN_EMAILS:
         return jsonify({"error": "forbidden"}), 403
-    started = start_tracking()
-    return jsonify({"ok": True, "started": started, "already_running": not started})
+    set_automated_tracking()
+    return jsonify({"ok": True, "tracking": TRACK_ACTIVE})
 
 @app.route("/api/admin/track/stop", methods=["POST"])
 def admin_track_stop():
     user = session.get("user")
     if not user or user["email"] not in ADMIN_EMAILS:
         return jsonify({"error": "forbidden"}), 403
-    stopped = stop_tracking()
-    return jsonify({"ok": True, "stopped": stopped, "was_running": stopped})
+    unset_automated_tracking()
+    return jsonify({"ok": True, "tracking": TRACK_ACTIVE})
 
 @app.route("/api/admin/track/fixture", methods=["POST"])
 def admin_track_fixture():

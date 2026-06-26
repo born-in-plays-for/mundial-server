@@ -405,7 +405,9 @@ async function toggleDiscover() {
 async function toggleTrack() {
   const isOn = document.getElementById('track-status').textContent === 'on';
   const endpoint = isOn ? '/api/admin/track/stop' : '/api/admin/track/start';
-  await fetch(BACKEND + endpoint, {method: 'POST', credentials: 'include'});
+  const r = await fetch(BACKEND + endpoint, {method: 'POST', credentials: 'include'});
+  const data = await r.json();
+  if (data.ok) updateToggle('track', data.tracking);
 }
 
 async function toggleWcFilter() {
@@ -421,21 +423,25 @@ async function toggleWcFilter() {
 }
 
 async function trackFixture(fid, tracked) {
-  await fetch(BACKEND + '/api/admin/track/fixture', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    credentials: 'include',
-    body: JSON.stringify({fid, tracked})
-  });
+  try {
+    await fetch(BACKEND + '/api/admin/track/fixture', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      credentials: 'include',
+      body: JSON.stringify({fid, tracked})
+    });
+  } catch (e) { showToast('Request failed — check connection'); }
 }
 
 async function trackAll(tracked) {
-  await fetch(BACKEND + '/api/admin/track/all', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    credentials: 'include',
-    body: JSON.stringify({tracked})
-  });
+  try {
+    await fetch(BACKEND + '/api/admin/track/all', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      credentials: 'include',
+      body: JSON.stringify({tracked})
+    });
+  } catch (e) { showToast('Request failed — check connection'); }
 }
 
 async function discoverFixtures() {
