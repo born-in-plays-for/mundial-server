@@ -204,7 +204,7 @@ Note: `start.sh` extracts the public URL from ngrok's JSON log output, not from 
 **ngrok URL stability:** on the free plan, the URL is technically ephemeral but in practice tends to stay the same across restarts. If it ever changes, you'll need to:
 
 1. Update `backend_config.json` with the new URL and push to GitHub
-2. Add the new URL to Google OAuth authorized JavaScript origins
+2. Add the new URL to Google OAuth authorized JavaScript origins: [Google Cloud Console → Credentials](https://console.cloud.google.com/apis/credentials) → select the project → open the OAuth 2.0 Client ID → **Authorized JavaScript origins** → **+ Add URI** → paste the ngrok URL (scheme + host only, e.g. `https://steep-refurbish-verbalize.ngrok-free.dev`) → Save
 
 WebSockets work through ngrok — use `{transports: ['websocket']}` on the client to avoid CORS issues with polling fallback.
 
