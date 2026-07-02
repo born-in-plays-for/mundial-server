@@ -534,4 +534,5 @@ logging.getLogger("werkzeug").addFilter(_WsUpgradeFilter())
 if __name__ == "__main__":
     log.info("Proxy → %s", API_BASE)
     log.info("Admin emails: %s", ADMIN_EMAILS)
+    tracker.start_discovering()
     socketio.run(app, host="0.0.0.0", port=5002, allow_unsafe_werkzeug=True)
